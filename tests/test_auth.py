@@ -145,3 +145,68 @@ async def test_logout_revokes_refresh_token(client, db_session):
 
     reused = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert reused.status_code == 401
+
+
+async def test_login_locks_after_max_failed_attempts(client, db_session):
+    await make_staff_user(db_session, email="bruteforce1@flotilla.mx")
+
+    for _ in range(settings.LOGIN_MAX_ATTEMPTS):
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "bruteforce1@flotilla.mx", "password": "contraseña-incorrecta"},
+        )
+        assert response.status_code == 401
+
+    locked = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "bruteforce1@flotilla.mx", "password": "contraseña-incorrecta"},
+    )
+    assert locked.status_code == 429
+
+    # Bloqueado incluso con la contraseña correcta: el bloqueo es del email,
+    # no un simple "N contraseñas malas seguidas".
+    still_locked = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "bruteforce1@flotilla.mx", "password": DEFAULT_PASSWORD},
+    )
+    assert still_locked.status_code == 429
+
+
+async def test_successful_login_resets_failure_counter(client, db_session):
+    await make_staff_user(db_session, email="no-bruteforceado@flotilla.mx")
+
+    for _ in range(settings.LOGIN_MAX_ATTEMPTS - 1):
+        await client.post(
+            "/api/v1/auth/login",
+            json={"email": "no-bruteforceado@flotilla.mx", "password": "contraseña-mala"},
+        )
+
+    success = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "no-bruteforceado@flotilla.mx", "password": DEFAULT_PASSWORD},
+    )
+    assert success.status_code == 200
+
+    # El contador se reinició: un fallo aislado después no debería bloquear.
+    after_reset = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "no-bruteforceado@flotilla.mx", "password": "contraseña-mala"},
+    )
+    assert after_reset.status_code == 401
+
+
+async def test_login_throttle_does_not_reveal_unknown_email(client, db_session):
+    """El bloqueo debe verse igual exista o no la cuenta: si un email
+    inexistente se bloqueara distinto que uno real, eso delataría cuáles
+    emails están registrados."""
+    email = "esta-cuenta-no-existe@flotilla.mx"
+    for _ in range(settings.LOGIN_MAX_ATTEMPTS):
+        response = await client.post(
+            "/api/v1/auth/login", json={"email": email, "password": "cualquiera"}
+        )
+        assert response.status_code == 401
+
+    locked = await client.post(
+        "/api/v1/auth/login", json={"email": email, "password": "cualquiera"}
+    )
+    assert locked.status_code == 429

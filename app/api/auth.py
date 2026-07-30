@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core import otp as otp_service
+from app.core import login_throttle, otp as otp_service
 from app.core.deps import get_current_user
 from app.core.security import (
     create_access_token,
@@ -115,6 +115,11 @@ async def verify_otp(payload: OTPVerify, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login", response_model=TokenPair)
 async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        await login_throttle.check_not_locked(payload.email)
+    except login_throttle.LoginLockedError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
@@ -124,7 +129,12 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
         or not verify_password(payload.password, user.password_hash)
         or not user.is_active
     ):
+        await login_throttle.record_failure(payload.email)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
+
+    # Contraseña correcta: ya no es un intento de fuerza bruta, aunque el
+    # rechazo de abajo (rol chofer) impida emitir tokens.
+    await login_throttle.reset(payload.email)
 
     if user.role == UserRole.DRIVER:
         raise HTTPException(

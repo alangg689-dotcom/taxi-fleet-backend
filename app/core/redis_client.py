@@ -1,9 +1,10 @@
 """Cliente Redis compartido.
 
-Redis cumple tres funciones distintas en este sistema:
+Redis cumple cuatro funciones distintas en este sistema:
   1. Cache de la última posición conocida de cada unidad (lectura instantánea).
-  2. Contadores atómicos para rate limiting de OTP.
+  2. Contadores atómicos para rate limiting de OTP y de /auth/login.
   3. Pub/Sub como bus de eventos entre instancias del backend.
+  4. Bloqueo temporal de intentos fallidos (OTP y login), sobre el mismo contador.
 """
 
 import json
@@ -17,6 +18,27 @@ redis_client: aioredis.Redis = aioredis.from_url(
     encoding="utf-8",
     decode_responses=True,
 )
+
+
+# --- Contadores atómicos --------------------------------------------------
+
+# INCR + EXPIRE en una sola operación indivisible. El TTL se fija solo en el
+# primer incremento, para que la ventana sea fija y no se renueve con cada
+# intento. Sin esto, dos intentos casi simultáneos podrían leer el mismo
+# valor antes de que cualquiera lo escribiera y dejar pasar más de la cuenta.
+_INCR_WITH_TTL = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
+
+async def incr_with_ttl(key: str, ttl: int) -> int:
+    """Incrementa `key` atómicamente; usado tanto por OTP como por el
+    rate-limit de /auth/login."""
+    return int(await redis_client.eval(_INCR_WITH_TTL, 1, key, ttl))
 
 
 # --- Cache de última posición -------------------------------------------------

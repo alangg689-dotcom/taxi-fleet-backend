@@ -68,6 +68,8 @@ El access token es un JWT de 15 minutos. El refresh token es opaco, se guarda ha
 
 Los límites del OTP (3 solicitudes por 15 min, 5 fallos antes de bloquear 30 min) se aplican con scripts Lua en Redis. Es lo que evita que tres toques al botón "reenviar" en el mismo segundo se salten el contador.
 
+`/auth/login` tiene el mismo mecanismo (5 fallos por email en 15 min → bloqueo de 30 min, `LOGIN_MAX_ATTEMPTS`/`LOGIN_ATTEMPT_WINDOW`/`LOGIN_LOCKOUT_SECONDS`), reusando el contador atómico de OTP (`app.core.redis_client.incr_with_ttl`). El bloqueo se cuenta igual exista o no el email, para no delatar qué cuentas están registradas.
+
 El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK oficial porque es síncrono y bloquearía el loop — ver [.env.example](.env.example) para las tres variables que hace falta llenar). Si Twilio falla, el endpoint **no lo refleja al cliente**: sigue respondiendo el mismo mensaje genérico y solo deja el error en el log. Devolver un código distinto revelaría que ese teléfono sí está registrado (a uno inexistente nunca se le intenta mandar SMS), justo el hueco de enumeración que este endpoint ya evita a propósito.
 
 ## Endpoints

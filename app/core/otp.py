@@ -1,11 +1,12 @@
 """Generación y verificación de códigos OTP para el login de choferes.
 
-Todos los contadores (solicitudes y fallos) se manipulan con scripts Lua, que
-Redis ejecuta de forma atómica. Esto evita la condición de carrera clásica: si
-el chofer presiona "reenviar" tres veces en el mismo segundo, un INCR y un
-EXPIRE por separado podrían leer el mismo valor antes de escribirlo y dejar
-pasar más intentos de los permitidos. Dentro de un script Lua eso no ocurre,
-porque Redis no intercala otros comandos mientras se ejecuta.
+Todos los contadores (solicitudes y fallos) se manipulan con un script Lua
+(ver app.core.redis_client.incr_with_ttl), que Redis ejecuta de forma atómica.
+Esto evita la condición de carrera clásica: si el chofer presiona "reenviar"
+tres veces en el mismo segundo, un INCR y un EXPIRE por separado podrían leer
+el mismo valor antes de escribirlo y dejar pasar más intentos de los
+permitidos. Dentro de un script Lua eso no ocurre, porque Redis no intercala
+otros comandos mientras se ejecuta.
 """
 
 import secrets
@@ -13,21 +14,10 @@ import secrets
 import httpx
 
 from app.config import settings
-from app.core.redis_client import redis_client
+from app.core.redis_client import incr_with_ttl, redis_client
 from app.core.security import hash_token
 
 _TWILIO_API_BASE = "https://api.twilio.com/2010-04-01"
-
-# INCR + EXPIRE en una sola operación indivisible.
-# El TTL se fija solo en el primer incremento, para que la ventana sea fija y
-# no se renueve con cada intento.
-_INCR_WITH_TTL = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
-"""
 
 
 class OTPError(Exception):
@@ -48,10 +38,6 @@ def _key(prefix: str, phone: str) -> str:
     return f"otp:{prefix}:{phone}"
 
 
-async def _incr_atomic(key: str, ttl: int) -> int:
-    return int(await redis_client.eval(_INCR_WITH_TTL, 1, key, ttl))
-
-
 async def request_otp(phone: str) -> str:
     """Genera y almacena un código nuevo. Devuelve el código en claro para que
     la capa de SMS lo envíe; en Redis solo queda el hash."""
@@ -60,7 +46,7 @@ async def request_otp(phone: str) -> str:
         ttl = await redis_client.ttl(_key("lock", phone))
         raise OTPError(f"Teléfono bloqueado temporalmente. Reintenta en {ttl}s.")
 
-    count = await _incr_atomic(_key("req", phone), settings.OTP_REQUEST_WINDOW)
+    count = await incr_with_ttl(_key("req", phone), settings.OTP_REQUEST_WINDOW)
     if count > settings.OTP_MAX_REQUESTS:
         raise OTPError("Demasiadas solicitudes. Espera unos minutos.")
 
@@ -84,7 +70,7 @@ async def verify_otp(phone: str, code: str) -> bool:
         raise OTPError("El código expiró o no fue solicitado.")
 
     if not secrets.compare_digest(stored, hash_token(code)):
-        fails = await _incr_atomic(_key("fail", phone), settings.OTP_TTL_SECONDS)
+        fails = await incr_with_ttl(_key("fail", phone), settings.OTP_TTL_SECONDS)
         if fails >= settings.OTP_MAX_ATTEMPTS:
             await redis_client.set(
                 _key("lock", phone), "1", ex=settings.OTP_LOCKOUT_SECONDS

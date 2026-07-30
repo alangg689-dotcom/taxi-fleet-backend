@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     OTP_MAX_ATTEMPTS: int = 5            # fallos antes de bloquear
     OTP_LOCKOUT_SECONDS: int = 1800      # bloqueo de 30 minutos
 
+    # --- Login (operadores/admin) ---
+    LOGIN_MAX_ATTEMPTS: int = 5          # fallos antes de bloquear
+    LOGIN_ATTEMPT_WINDOW: int = 900      # ventana de 15 minutos para contar fallos
+    LOGIN_LOCKOUT_SECONDS: int = 1800    # bloqueo de 30 minutos
+
     # --- Telemetría ---
     LOCATION_BATCH_MAX: int = 100        # máx. pings por lote (buffer offline)
     LOCATION_CHANNEL: str = "fleet:updates"   # canal Redis pub/sub
