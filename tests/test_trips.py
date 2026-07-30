@@ -1,0 +1,198 @@
+import uuid
+
+from app.models import UserRole
+from tests.factories import auth_headers, make_driver, make_staff_user, make_vehicle
+
+
+async def _dispatch(client, headers, vehicle_id, driver_id, **extra):
+    payload = {
+        "vehicle_id": str(vehicle_id),
+        "driver_id": str(driver_id),
+        "origin_lat": 19.4326,
+        "origin_lng": -99.1332,
+        **extra,
+    }
+    return await client.post("/api/v1/trips", json=payload, headers=headers)
+
+
+async def test_create_trip_round_trips_coordinates(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver, _ = await make_driver(db_session)
+    headers = auth_headers(operator_token)
+
+    response = await _dispatch(
+        client,
+        headers,
+        vehicle.id,
+        driver.id,
+        origin_address="Zócalo",
+        destination_lat=19.4429,
+        destination_lng=-99.2013,
+        destination_address="Polanco",
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "solicitado"
+    assert body["origin_lat"] == 19.4326
+    assert body["origin_lng"] == -99.1332
+    assert body["destination_lat"] == 19.4429
+    assert body["destination_address"] == "Polanco"
+    assert body["started_at"] is None
+
+
+async def test_create_trip_without_destination(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver, _ = await make_driver(db_session)
+
+    response = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["destination_lat"] is None
+    assert body["destination_address"] is None
+
+
+async def test_cannot_dispatch_same_vehicle_twice(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver_one, _ = await make_driver(db_session)
+    driver_two, _ = await make_driver(db_session)
+    headers = auth_headers(operator_token)
+
+    first = await _dispatch(client, headers, vehicle.id, driver_one.id)
+    assert first.status_code == 201
+
+    second = await _dispatch(client, headers, vehicle.id, driver_two.id)
+    assert second.status_code == 409
+
+
+async def test_create_trip_unknown_vehicle_or_driver_is_404(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    driver, _ = await make_driver(db_session)
+    headers = auth_headers(operator_token)
+
+    missing_vehicle = await _dispatch(client, headers, uuid.uuid4(), driver.id)
+    assert missing_vehicle.status_code == 404
+
+    vehicle = await make_vehicle(db_session)
+    missing_driver = await _dispatch(client, headers, vehicle.id, uuid.uuid4())
+    assert missing_driver.status_code == 404
+
+
+async def test_driver_cannot_see_another_drivers_trip(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    owner, _owner_token = await make_driver(db_session)
+    _, other_driver_token = await make_driver(db_session)
+
+    created = await _dispatch(
+        client, auth_headers(operator_token), vehicle.id, owner.id
+    )
+    trip_id = created.json()["id"]
+
+    response = await client.get(
+        f"/api/v1/trips/{trip_id}", headers=auth_headers(other_driver_token)
+    )
+    assert response.status_code == 403
+
+
+async def test_full_lifecycle_accept_start_complete(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver, driver_token = await make_driver(db_session)
+    driver_headers = auth_headers(driver_token)
+
+    created = await _dispatch(
+        client, auth_headers(operator_token), vehicle.id, driver.id
+    )
+    trip_id = created.json()["id"]
+
+    accepted = await client.post(f"/api/v1/trips/{trip_id}/accept", headers=driver_headers)
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "asignado"
+
+    started = await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
+    assert started.status_code == 200
+    assert started.json()["status"] == "en_curso"
+    assert started.json()["started_at"] is not None
+
+    completed = await client.post(f"/api/v1/trips/{trip_id}/complete", headers=driver_headers)
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completado"
+    assert completed.json()["completed_at"] is not None
+
+
+async def test_cannot_skip_states_out_of_order(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver, driver_token = await make_driver(db_session)
+    driver_headers = auth_headers(driver_token)
+
+    created = await _dispatch(
+        client, auth_headers(operator_token), vehicle.id, driver.id
+    )
+    trip_id = created.json()["id"]
+
+    # SOLICITADO -> start (se salta accept) debe rechazarse.
+    response = await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
+    assert response.status_code == 409
+
+
+async def test_cancel_trip_then_cancel_again_conflicts(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver, _ = await make_driver(db_session)
+    headers = auth_headers(operator_token)
+
+    created = await _dispatch(client, headers, vehicle.id, driver.id)
+    trip_id = created.json()["id"]
+
+    cancelled = await client.post(f"/api/v1/trips/{trip_id}/cancel", headers=headers)
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelado"
+
+    again = await client.post(f"/api/v1/trips/{trip_id}/cancel", headers=headers)
+    assert again.status_code == 409
+
+
+async def test_cancelling_a_trip_frees_the_vehicle_for_redispatch(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver_one, _ = await make_driver(db_session)
+    driver_two, _ = await make_driver(db_session)
+    headers = auth_headers(operator_token)
+
+    created = await _dispatch(client, headers, vehicle.id, driver_one.id)
+    trip_id = created.json()["id"]
+    await client.post(f"/api/v1/trips/{trip_id}/cancel", headers=headers)
+
+    redispatched = await _dispatch(client, headers, vehicle.id, driver_two.id)
+    assert redispatched.status_code == 201
+
+
+async def test_list_trips_filters_by_status(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    headers = auth_headers(operator_token)
+
+    vehicle_a = await make_vehicle(db_session)
+    driver_a, _ = await make_driver(db_session)
+    trip_a = (await _dispatch(client, headers, vehicle_a.id, driver_a.id)).json()
+
+    vehicle_b = await make_vehicle(db_session)
+    driver_b, _ = await make_driver(db_session)
+    trip_b_resp = await _dispatch(client, headers, vehicle_b.id, driver_b.id)
+    trip_b_id = trip_b_resp.json()["id"]
+    await client.post(f"/api/v1/trips/{trip_b_id}/cancel", headers=headers)
+
+    solicitados = await client.get("/api/v1/trips?status=solicitado", headers=headers)
+    ids = {t["id"] for t in solicitados.json()}
+    assert trip_a["id"] in ids
+    assert trip_b_id not in ids
+
+    cancelados = await client.get("/api/v1/trips?status=cancelado", headers=headers)
+    ids = {t["id"] for t in cancelados.json()}
+    assert trip_b_id in ids
+    assert trip_a["id"] not in ids

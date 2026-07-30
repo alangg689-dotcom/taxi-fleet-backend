@@ -1,0 +1,72 @@
+"""Punto de entrada de la API."""
+
+import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api import auth, drivers, location, trips, vehicles
+from app.config import settings
+from app.core.redis_client import redis_client
+from app.ws import fleet
+
+logging.basicConfig(level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # El listener de Redis debe vivir tanto como la aplicación: es lo que
+    # conecta los pings entrantes con los dashboards de esta instancia.
+    listener = asyncio.create_task(fleet.redis_listener())
+    yield
+    listener.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await listener
+    await redis_client.aclose()
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version="0.1.0",
+    description="Geolocalización y monitoreo GPS de flotilla de taxis en tiempo real",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,  # "*" en dev; dominio real en CORS_ORIGINS en prod
+    # Sin cookies: la auth viaja en el header Authorization, que el navegador
+    # no manda automático. allow_credentials no aplica y con "*" sería inválido
+    # (los navegadores rechazan wildcard + credenciales en el mismo origin).
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router, prefix="/api/v1")
+
+# El orden importa: FastAPI resuelve las rutas de arriba hacia abajo. El router
+# de telemetría define rutas estáticas como /vehicles/nearby y
+# /vehicles/locations; si se registrara después del router de vehículos, el
+# patrón /vehicles/{vehicle_id} las capturaría primero e intentaría leer
+# "nearby" como un UUID.
+app.include_router(location.router, prefix="/api/v1")
+app.include_router(vehicles.router, prefix="/api/v1")
+app.include_router(trips.router, prefix="/api/v1")
+app.include_router(drivers.router, prefix="/api/v1")
+app.include_router(fleet.router)
+
+
+@app.get("/health", tags=["health"])
+async def health():
+    """Sonda de salud para el balanceador de carga."""
+    try:
+        await redis_client.ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+    return {"status": "ok", "redis": redis_ok}

@@ -1,0 +1,46 @@
+services:
+  db:
+    # Imagen "ha" de Timescale: trae TimescaleDB y PostGIS ya compilados.
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: flotilla
+      POSTGRES_PASSWORD: flotilla
+      POSTGRES_DB: flotilla
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flotilla"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://flotilla:flotilla@db:5432/flotilla
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: dev-secret-no-usar-en-produccion
+      DEBUG: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/code
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  db_data:
