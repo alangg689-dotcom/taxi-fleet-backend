@@ -131,15 +131,31 @@ async def list_trips(
     vehicle_id: uuid.UUID | None = None,
     driver_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(staff_only),
+    user: User = Depends(driver_or_staff),
 ):
+    """Staff ve toda la flota y puede filtrar por cualquier driver_id/vehicle_id.
+
+    Un chofer solo ve sus propios viajes: es como se resuelve "mis viajes" sin
+    un endpoint aparte (que además chocaría en el orden de rutas con
+    `/trips/{trip_id}`, igual que pasa con `/vehicles/nearby`). `driver_id` se
+    ignora si lo manda un chofer — se fuerza al suyo, así `GET /trips` sin
+    argumentos ya le sirve a la app.
+    """
     query = select(*_trip_columns()).order_by(Trip.requested_at.desc())
+
+    if user.role == UserRole.DRIVER:
+        own_driver = await db.execute(select(Driver).where(Driver.user_id == user.id))
+        driver = own_driver.scalar_one_or_none()
+        if driver is None:
+            return []
+        query = query.where(Trip.driver_id == driver.id)
+    elif driver_id is not None:
+        query = query.where(Trip.driver_id == driver_id)
+
     if trip_status is not None:
         query = query.where(Trip.status == trip_status)
     if vehicle_id is not None:
         query = query.where(Trip.vehicle_id == vehicle_id)
-    if driver_id is not None:
-        query = query.where(Trip.driver_id == driver_id)
 
     result = await db.execute(query)
     return [TripOut(**row) for row in result.mappings().all()]

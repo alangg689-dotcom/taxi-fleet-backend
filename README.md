@@ -84,7 +84,7 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 **Telemetría** — `POST /location/ping` · `GET /vehicles/locations` (snapshot de flota) · `GET /vehicles/{id}/location` · `GET /vehicles/nearby?lat=&lng=&radius=` · `GET /vehicles/{id}/history?since=&until=` · `GET /vehicles/{id}/history/summary?since=&until=` (posición promedio cada 5 min, para rangos largos)
 
-**Viajes** — `POST /trips` (despacha unidad + chofer) · `GET /trips?status=&vehicle_id=&driver_id=` · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
+**Viajes** — `POST /trips` (despacha unidad + chofer) · `GET /trips?status=&vehicle_id=&driver_id=` (staff ve toda la flota; un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
 
 **Tiempo real** — `WS /ws/driver?device_key=...` · `WS /ws/fleet?token=...`
 
@@ -147,6 +147,6 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
 - [x] Restringir CORS al dominio del dashboard antes de producción (`CORS_ORIGINS` en `.env`)
 - [x] Agregados continuos de TimescaleDB para reportería (`vehicle_position_5min`, cada 5 min)
 - [x] Pruebas de los WebSockets (`/ws/driver`, `/ws/fleet`)
-- [ ] "Mis viajes" — endpoint de autoservicio para que un chofer liste sus propios viajes sin conocer el ID de antemano
+- [x] "Mis viajes" — un chofer ahora puede hacer `GET /trips` y ver los suyos sin conocer el ID de antemano
 - [ ] Paginación en los endpoints de listado (`/vehicles`, `/drivers`, `/trips`)
 - [ ] Probar la integración de Twilio contra una cuenta real (hoy solo se prueba el POST a la API, con credenciales de prueba)

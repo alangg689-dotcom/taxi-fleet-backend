@@ -196,3 +196,58 @@ async def test_list_trips_filters_by_status(client, db_session):
     ids = {t["id"] for t in cancelados.json()}
     assert trip_b_id in ids
     assert trip_a["id"] not in ids
+
+
+async def test_driver_lists_only_their_own_trips(client, db_session):
+    """'Mis viajes': un chofer no necesita conocer IDs de antemano, GET /trips
+    a secas ya le devuelve solo lo suyo."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    operator_headers = auth_headers(operator_token)
+
+    vehicle_a = await make_vehicle(db_session)
+    owner, owner_token = await make_driver(db_session)
+    own_trip = (
+        await _dispatch(client, operator_headers, vehicle_a.id, owner.id)
+    ).json()
+
+    vehicle_b = await make_vehicle(db_session)
+    other_driver, _ = await make_driver(db_session)
+    other_trip = (
+        await _dispatch(client, operator_headers, vehicle_b.id, other_driver.id)
+    ).json()
+
+    response = await client.get("/api/v1/trips", headers=auth_headers(owner_token))
+    assert response.status_code == 200
+    ids = {t["id"] for t in response.json()}
+    assert ids == {own_trip["id"]}
+    assert other_trip["id"] not in ids
+
+
+async def test_driver_cannot_use_driver_id_filter_to_see_others_trips(client, db_session):
+    """driver_id en la query se ignora si lo manda un chofer: se fuerza al
+    suyo, para que no pueda pedir los viajes de otro cambiando el parámetro."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    operator_headers = auth_headers(operator_token)
+
+    vehicle = await make_vehicle(db_session)
+    _, requester_token = await make_driver(db_session)
+    other_driver, _ = await make_driver(db_session)
+    other_trip = (
+        await _dispatch(client, operator_headers, vehicle.id, other_driver.id)
+    ).json()
+
+    response = await client.get(
+        f"/api/v1/trips?driver_id={other_driver.id}",
+        headers=auth_headers(requester_token),
+    )
+    assert response.status_code == 200
+    ids = {t["id"] for t in response.json()}
+    assert other_trip["id"] not in ids
+
+
+async def test_driver_without_trips_gets_empty_list(client, db_session):
+    _, driver_token = await make_driver(db_session)
+
+    response = await client.get("/api/v1/trips", headers=auth_headers(driver_token))
+    assert response.status_code == 200
+    assert response.json() == []
