@@ -32,7 +32,15 @@ def _driver_query():
         Driver.full_name,
         Driver.license_number,
         Driver.status,
+        User.is_active,
     ).join(User, User.id == Driver.user_id)
+
+
+async def _get_driver_or_404(db: AsyncSession, driver_id: uuid.UUID) -> Driver:
+    driver = await db.get(Driver, driver_id)
+    if driver is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chofer no encontrado")
+    return driver
 
 
 @router.post("", response_model=DriverOut, status_code=status.HTTP_201_CREATED)
@@ -97,12 +105,43 @@ async def update_driver(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
-    driver = await db.get(Driver, driver_id)
-    if driver is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chofer no encontrado")
+    driver = await _get_driver_or_404(db, driver_id)
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(driver, field, value)
+
+    result = await db.execute(_driver_query().where(Driver.id == driver_id))
+    return DriverOut(**result.mappings().one())
+
+
+@router.post("/{driver_id}/deactivate", response_model=DriverOut)
+async def deactivate_driver(
+    driver_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(admin_only),
+):
+    """Revoca el acceso por completo (User.is_active=False): a diferencia de
+    `status` (activo/inactivo operativo — ej. de vacaciones, sigue pudiendo
+    entrar), esto le corta el login ya, para cuando deja la flotilla. Efectivo
+    de inmediato: get_current_user revisa is_active en cada request, no solo
+    al emitir el token."""
+    driver = await _get_driver_or_404(db, driver_id)
+    user = await db.get(User, driver.user_id)
+    user.is_active = False
+
+    result = await db.execute(_driver_query().where(Driver.id == driver_id))
+    return DriverOut(**result.mappings().one())
+
+
+@router.post("/{driver_id}/reactivate", response_model=DriverOut)
+async def reactivate_driver(
+    driver_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(admin_only),
+):
+    driver = await _get_driver_or_404(db, driver_id)
+    user = await db.get(User, driver.user_id)
+    user.is_active = True
 
     result = await db.execute(_driver_query().where(Driver.id == driver_id))
     return DriverOut(**result.mappings().one())

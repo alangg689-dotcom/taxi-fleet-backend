@@ -27,3 +27,4 @@ class DriverOut(BaseModel):
     full_name: str
     license_number: str
     status: DriverStatus
+    is_active: bool

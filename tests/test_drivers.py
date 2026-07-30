@@ -1,3 +1,4 @@
+import app.core.otp as otp_service
 from app.models import UserRole
 from tests.factories import auth_headers, make_driver, make_staff_user
 
@@ -108,7 +109,9 @@ async def test_get_unknown_driver_is_404(client, db_session):
     assert response.status_code == 404
 
 
-async def test_operator_can_deactivate_driver(client, db_session):
+async def test_operator_can_set_operational_status(client, db_session):
+    """DriverStatus (activo/inactivo operativo, ej. vacaciones) es distinto de
+    User.is_active (login revocado): esto solo toca el primero."""
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     driver, _ = await make_driver(db_session)
 
@@ -119,3 +122,62 @@ async def test_operator_can_deactivate_driver(client, db_session):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "inactivo"
+    assert response.json()["is_active"] is True
+
+
+async def test_admin_can_revoke_and_restore_driver_access(client, db_session):
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    driver, _ = await make_driver(db_session)
+    headers = auth_headers(admin_token)
+
+    deactivated = await client.post(
+        f"/api/v1/drivers/{driver.id}/deactivate", headers=headers
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["is_active"] is False
+
+    reactivated = await client.post(
+        f"/api/v1/drivers/{driver.id}/reactivate", headers=headers
+    )
+    assert reactivated.status_code == 200
+    assert reactivated.json()["is_active"] is True
+
+
+async def test_operator_cannot_revoke_driver_access(client, db_session):
+    """Revocar acceso es más sensible que activar/inactivar operativamente:
+    solo admin, igual que la alta."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    driver, _ = await make_driver(db_session)
+
+    response = await client.post(
+        f"/api/v1/drivers/{driver.id}/deactivate",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 403
+
+
+async def test_deactivated_driver_otp_request_yields_no_code(
+    client, db_session, monkeypatch
+):
+    """Al revocar el acceso, pedir OTP para ese teléfono no debe generar
+    código — el mismo camino silencioso que un teléfono inexistente, para no
+    delatar la diferencia."""
+    sent_codes: list[tuple[str, str]] = []
+
+    async def _fake_send_sms(phone: str, code: str) -> None:
+        sent_codes.append((phone, code))
+
+    monkeypatch.setattr(otp_service, "send_sms", _fake_send_sms)
+
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    driver, _ = await make_driver(db_session, phone="+525512340093")
+
+    await client.post(
+        f"/api/v1/drivers/{driver.id}/deactivate", headers=auth_headers(admin_token)
+    )
+
+    response = await client.post(
+        "/api/v1/auth/otp/request", json={"phone": "+525512340093"}
+    )
+    assert response.status_code == 200
+    assert sent_codes == []

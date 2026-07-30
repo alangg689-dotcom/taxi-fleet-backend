@@ -78,7 +78,7 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 **Vehículos** — `GET|POST /vehicles` · `GET|PATCH /vehicles/{id}` · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close`
 
-**Choferes** — `GET|POST /drivers` (alta solo admin) · `GET|PATCH /drivers/{id}`
+**Choferes** — `GET|POST /drivers` (alta solo admin) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin)
 
 **Telemetría** — `POST /location/ping` · `GET /vehicles/locations` (snapshot de flota) · `GET /vehicles/{id}/location` · `GET /vehicles/nearby?lat=&lng=&radius=` · `GET /vehicles/{id}/history?since=&until=` · `GET /vehicles/{id}/history/summary?since=&until=` (posición promedio cada 5 min, para rangos largos)
 
@@ -135,6 +135,7 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
 - **`GEOGRAPHY(Point, 4326)` en vez de dos columnas decimal.** Con un índice GiST, `ST_DWithin` resuelve cercanía y geofencing en milisegundos. Con lat/lng sueltos habría que calcular Haversine fila por fila, sin índice.
 - **`location_pings` es una hypertable de TimescaleDB.** El particionado por fecha (fragmentos de 7 días), la compresión a los 30 días y la retención a los 365 se declaran una vez en la migración inicial y corren solos. Ajustar la retención según los requisitos legales de la operación.
 - **`vehicle_position_5min` es un agregado continuo.** Vista materializada con posición/velocidad promedio por unidad cada 5 minutos, mantenida al día por su propia política de refresco de TimescaleDB (hasta ~5 min de rezago). Existe para que la reportería sobre rangos largos (`GET /vehicles/{id}/history/summary`) no tenga que promediar millones de pings crudos en cada consulta.
+- **`Driver.status` no es lo mismo que `User.is_active`.** El primero es operativo (activo/inactivo — de vacaciones, por ejemplo, y sigue pudiendo entrar); el segundo es la cuenta (`POST /drivers/{id}/deactivate`), y corta el login de inmediato porque `get_current_user` revisa `is_active` en cada request, no solo al emitir el token.
 
 ## Pendiente
 
