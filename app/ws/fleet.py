@@ -25,15 +25,16 @@ import contextlib
 import json
 import logging
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _broadcast_latest, _persist_pings
 from app.config import settings
 from app.core.redis_client import get_all_last_positions, redis_client
 from app.core.security import decode_access_token, hash_token
-from app.database import SessionLocal
+from app.database import get_db
 from app.models import UserRole, Vehicle
 from app.schemas.location import LocationPingIn
 
@@ -135,17 +136,25 @@ async def fleet_socket(websocket: WebSocket, token: str = Query(...)):
 # --- App del chofer -----------------------------------------------------------
 
 @router.websocket("/ws/driver")
-async def driver_socket(websocket: WebSocket, device_key: str = Query(...)):
+async def driver_socket(
+    websocket: WebSocket,
+    device_key: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
     """La app del chofer mantiene esta conexión abierta y emite su posición.
 
     Acepta un objeto suelto o un array, igual que el endpoint REST: al salir de
     un túnel la app descarga de golpe el buffer que acumuló sin señal.
+
+    `db` llega por Depends como en cualquier endpoint REST (y no por un
+    `SessionLocal()` manual): así la conexión completa —desde la búsqueda de
+    la unidad hasta cada commit del loop— pasa por la misma sesión que la
+    suite de pruebas puede sustituir con `dependency_overrides`.
     """
-    async with SessionLocal() as db:
-        result = await db.execute(
-            select(Vehicle).where(Vehicle.device_key_hash == hash_token(device_key))
-        )
-        vehicle = result.scalar_one_or_none()
+    result = await db.execute(
+        select(Vehicle).where(Vehicle.device_key_hash == hash_token(device_key))
+    )
+    vehicle = result.scalar_one_or_none()
 
     if vehicle is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -170,9 +179,8 @@ async def driver_socket(websocket: WebSocket, device_key: str = Query(...)):
                 )
                 continue
 
-            async with SessionLocal() as db:
-                accepted = await _persist_pings(db, vehicle.id, pings)
-                await db.commit()
+            accepted = await _persist_pings(db, vehicle.id, pings)
+            await db.commit()
 
             await _broadcast_latest(vehicle.id, pings[-1])
 

@@ -9,7 +9,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, hash_password
+from app.core.security import create_access_token, generate_token, hash_password, hash_token
 from app.models import Driver, DriverStatus, Operator, PermissionLevel, User, UserRole, Vehicle
 
 DEFAULT_PASSWORD = "Password123"
@@ -63,12 +63,21 @@ async def make_driver(
     return driver, token
 
 
-async def make_vehicle(db: AsyncSession, *, plate: str | None = None) -> Vehicle:
+async def make_vehicle(
+    db: AsyncSession, *, plate: str | None = None, with_device_key: bool = False
+) -> Vehicle | tuple[Vehicle, str]:
+    """Con with_device_key=True devuelve (vehicle, device_key crudo): igual que
+    el alta real, el hash es lo único que queda en la base."""
     plate = plate or f"TST-{uuid.uuid4().hex[:6].upper()}"
-    vehicle = Vehicle(plate=plate, model="Vehículo de prueba")
+    device_key = generate_token() if with_device_key else None
+    vehicle = Vehicle(
+        plate=plate,
+        model="Vehículo de prueba",
+        device_key_hash=hash_token(device_key) if device_key else None,
+    )
     db.add(vehicle)
     await db.flush()
-    return vehicle
+    return (vehicle, device_key) if with_device_key else vehicle
 
 
 def auth_headers(token: str) -> dict[str, str]:

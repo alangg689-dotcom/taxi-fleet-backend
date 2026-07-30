@@ -36,6 +36,8 @@ pytest
 
 Corren contra Postgres real (`flotilla_test`, en el mismo contenedor de `docker compose`), no contra SQLite ni mocks: media base de código son consultas espaciales y enums nativos de Postgres que un motor distinto no reproduce fielmente — ese desajuste ya costó dos bugs en producción antes de que existiera esta suite. `conftest.py` crea la base de pruebas y corre las migraciones automáticamente la primera vez; solo hace falta que `db`/`redis` estén levantados (`docker compose up -d db redis`).
 
+Los WebSockets (`/ws/driver`, `/ws/fleet`) se prueban con [httpx-ws](https://github.com/frankie567/httpx-ws) en vez de `starlette.testclient.TestClient`: este último corre la app en un hilo aparte con su propio event loop, y la sesión de prueba (ligada al loop del test vía SAVEPOINT) reventaría con un error de "Future attached to a different loop" en cuanto la tocara desde ahí. httpx-ws viaja sobre el mismo tipo de transporte ASGI que el resto de las pruebas, así que todo corre en un único loop.
+
 Cada test corre dentro de un SAVEPOINT que se revierte al final, así ninguno ve los datos de otro y nunca se toca la base de datos de desarrollo.
 
 ## Estructura
@@ -144,3 +146,7 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
 - [x] Suite de pruebas con pytest (auth, vehicles, trips, reportería)
 - [x] Restringir CORS al dominio del dashboard antes de producción (`CORS_ORIGINS` en `.env`)
 - [x] Agregados continuos de TimescaleDB para reportería (`vehicle_position_5min`, cada 5 min)
+- [x] Pruebas de los WebSockets (`/ws/driver`, `/ws/fleet`)
+- [ ] "Mis viajes" — endpoint de autoservicio para que un chofer liste sus propios viajes sin conocer el ID de antemano
+- [ ] Paginación en los endpoints de listado (`/vehicles`, `/drivers`, `/trips`)
+- [ ] Probar la integración de Twilio contra una cuenta real (hoy solo se prueba el POST a la API, con credenciales de prueba)

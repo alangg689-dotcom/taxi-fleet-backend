@@ -30,6 +30,7 @@ import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
 from httpx import ASGITransport, AsyncClient
+from httpx_ws.transport import ASGIWebSocketTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -123,6 +124,25 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest.fixture
+def ws_client_factory(db_session: AsyncSession):
+    """Fábrica (no un cliente ya armado) para las pruebas de WebSockets.
+
+    `ASGIWebSocketTransport.__aenter__` crea un anyio task group que su
+    `__aexit__` exige cerrar desde la MISMA task. Un fixture generador de
+    pytest-asyncio corre su `yield` y su finalizer en tasks distintas, así que
+    envolver el `async with` aquí revienta con "Attempted to exit cancel scope
+    in a different task". Por eso esto no entra al context manager: cada
+    prueba lo hace ella misma con `async with ws_client_factory() as ws:`, todo
+    dentro de una sola task.
+    """
+
+    def _make() -> AsyncClient:
+        return AsyncClient(transport=ASGIWebSocketTransport(app=app), base_url="http://test")
+
+    return _make
 
 
 @pytest_asyncio.fixture(autouse=True)
