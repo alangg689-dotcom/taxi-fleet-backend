@@ -148,5 +148,5 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
 - [x] Agregados continuos de TimescaleDB para reportería (`vehicle_position_5min`, cada 5 min)
 - [x] Pruebas de los WebSockets (`/ws/driver`, `/ws/fleet`)
 - [x] "Mis viajes" — un chofer ahora puede hacer `GET /trips` y ver los suyos sin conocer el ID de antemano
+- [x] Probar la integración de Twilio contra una cuenta real (verificado en vivo: SMS entregado a un teléfono real)
 - [ ] Paginación en los endpoints de listado (`/vehicles`, `/drivers`, `/trips`)
-- [ ] Probar la integración de Twilio contra una cuenta real (hoy solo se prueba el POST a la API, con credenciales de prueba)
