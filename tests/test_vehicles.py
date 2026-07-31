@@ -72,6 +72,30 @@ async def test_get_unknown_vehicle_is_404(client, db_session):
     assert response.status_code == 404
 
 
+async def test_list_vehicles_paginates_with_total_count_header(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    headers = auth_headers(operator_token)
+
+    plates = [f"PAG-{i:03d}" for i in range(5)]
+    for plate in plates:
+        await make_vehicle(db_session, plate=plate)
+
+    first_page = await client.get(
+        "/api/v1/vehicles?limit=2&offset=0", headers=headers
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert int(first_page.headers["X-Total-Count"]) >= 5
+
+    second_page = await client.get(
+        "/api/v1/vehicles?limit=2&offset=2", headers=headers
+    )
+    assert second_page.status_code == 200
+    first_ids = {v["id"] for v in first_page.json()}
+    second_ids = {v["id"] for v in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
 async def test_open_assignment_closes_previous_shift(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     vehicle = await make_vehicle(db_session)

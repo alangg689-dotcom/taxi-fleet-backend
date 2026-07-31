@@ -3,8 +3,8 @@
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_roles
@@ -28,9 +28,21 @@ admin_only = require_roles(UserRole.ADMIN)
 
 @router.get("", response_model=list[VehicleOut])
 async def list_vehicles(
-    db: AsyncSession = Depends(get_db), _: User = Depends(staff_only)
+    response: Response,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
 ):
-    result = await db.execute(select(Vehicle).order_by(Vehicle.plate))
+    """El total (antes de aplicar limit/offset) va en el header `X-Total-Count`:
+    así el cuerpo se queda como una lista plana, sin romper a quien ya
+    consume este endpoint sin paginar."""
+    total = await db.scalar(select(func.count()).select_from(Vehicle))
+    response.headers["X-Total-Count"] = str(total)
+
+    result = await db.execute(
+        select(Vehicle).order_by(Vehicle.plate).limit(limit).offset(offset)
+    )
     return list(result.scalars().all())
 
 

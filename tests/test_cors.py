@@ -1,4 +1,6 @@
 from app.config import Settings
+from app.models import UserRole
+from tests.factories import auth_headers, make_staff_user
 
 
 def test_cors_origins_wildcard_default():
@@ -33,3 +35,17 @@ async def test_preflight_allows_wildcard_without_credentials(client):
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "*"
     assert "access-control-allow-credentials" not in response.headers
+
+
+async def test_total_count_header_is_exposed_for_browser_clients(client, db_session):
+    """X-Total-Count (paginación) va en toda respuesta de listado, pero sin
+    Access-Control-Expose-Headers el navegador lo descarta antes de que el
+    JS del dashboard pueda leerlo con fetch()."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.get(
+        "/api/v1/vehicles",
+        headers={**auth_headers(operator_token), "Origin": "https://dashboard.flotilla.mx"},
+    )
+    assert response.status_code == 200
+    assert "X-Total-Count" in response.headers["access-control-expose-headers"]

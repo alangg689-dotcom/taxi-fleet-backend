@@ -15,7 +15,7 @@ puede venir de cualquiera de los dos lados.
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from geoalchemy2 import Geometry
 from sqlalchemy import cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,9 +127,12 @@ async def create_trip(
 
 @router.get("", response_model=list[TripOut])
 async def list_trips(
+    response: Response,
     trip_status: TripStatus | None = Query(None, alias="status"),
     vehicle_id: uuid.UUID | None = None,
     driver_id: uuid.UUID | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(driver_or_staff),
 ):
@@ -140,23 +143,37 @@ async def list_trips(
     `/trips/{trip_id}`, igual que pasa con `/vehicles/nearby`). `driver_id` se
     ignora si lo manda un chofer — se fuerza al suyo, así `GET /trips` sin
     argumentos ya le sirve a la app.
+
+    El total que coincide con los filtros (antes de limit/offset) va en el
+    header `X-Total-Count`, igual que en /vehicles y /drivers.
     """
-    query = select(*_trip_columns()).order_by(Trip.requested_at.desc())
+    conditions = []
 
     if user.role == UserRole.DRIVER:
         own_driver = await db.execute(select(Driver).where(Driver.user_id == user.id))
         driver = own_driver.scalar_one_or_none()
         if driver is None:
+            response.headers["X-Total-Count"] = "0"
             return []
-        query = query.where(Trip.driver_id == driver.id)
+        conditions.append(Trip.driver_id == driver.id)
     elif driver_id is not None:
-        query = query.where(Trip.driver_id == driver_id)
+        conditions.append(Trip.driver_id == driver_id)
 
     if trip_status is not None:
-        query = query.where(Trip.status == trip_status)
+        conditions.append(Trip.status == trip_status)
     if vehicle_id is not None:
-        query = query.where(Trip.vehicle_id == vehicle_id)
+        conditions.append(Trip.vehicle_id == vehicle_id)
 
+    total = await db.scalar(select(func.count()).select_from(Trip).where(*conditions))
+    response.headers["X-Total-Count"] = str(total)
+
+    query = (
+        select(*_trip_columns())
+        .where(*conditions)
+        .order_by(Trip.requested_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     result = await db.execute(query)
     return [TripOut(**row) for row in result.mappings().all()]
 

@@ -78,13 +78,15 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 **Auth** — `POST /auth/otp/request` · `/auth/otp/verify` · `/auth/login` · `/auth/refresh` · `/auth/logout`
 
-**Vehículos** — `GET|POST /vehicles` · `GET|PATCH /vehicles/{id}` · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close`
+**Vehículos** — `GET|POST /vehicles` (paginado, ver abajo) · `GET|PATCH /vehicles/{id}` · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close`
 
-**Choferes** — `GET|POST /drivers` (alta solo admin) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin)
+**Choferes** — `GET|POST /drivers` (alta solo admin; listado paginado) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin)
 
 **Telemetría** — `POST /location/ping` · `GET /vehicles/locations` (snapshot de flota) · `GET /vehicles/{id}/location` · `GET /vehicles/nearby?lat=&lng=&radius=` · `GET /vehicles/{id}/history?since=&until=` · `GET /vehicles/{id}/history/summary?since=&until=` (posición promedio cada 5 min, para rangos largos)
 
-**Viajes** — `POST /trips` (despacha unidad + chofer) · `GET /trips?status=&vehicle_id=&driver_id=` (staff ve toda la flota; un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
+**Viajes** — `POST /trips` (despacha unidad + chofer) · `GET /trips?status=&vehicle_id=&driver_id=` (paginado; staff ve toda la flota, un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
+
+Los tres listados (`/vehicles`, `/drivers`, `/trips`) aceptan `limit` (default 50, máximo 200) y `offset`. El total que coincide con los filtros —antes de aplicar `limit`/`offset`— va en el header de respuesta `X-Total-Count`, no en el cuerpo: así el JSON se queda como una lista plana y no rompe a nadie que ya lo consuma sin paginar. Ese header está expuesto por CORS (`Access-Control-Expose-Headers`) para que un dashboard en el navegador pueda leerlo con `fetch()`.
 
 **Tiempo real** — `WS /ws/driver?device_key=...` · `WS /ws/fleet?token=...`
 
@@ -149,4 +151,4 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
 - [x] Pruebas de los WebSockets (`/ws/driver`, `/ws/fleet`)
 - [x] "Mis viajes" — un chofer ahora puede hacer `GET /trips` y ver los suyos sin conocer el ID de antemano
 - [x] Probar la integración de Twilio contra una cuenta real (verificado en vivo: SMS entregado a un teléfono real)
-- [ ] Paginación en los endpoints de listado (`/vehicles`, `/drivers`, `/trips`)
+- [x] Paginación en los endpoints de listado (`/vehicles`, `/drivers`, `/trips`; total en el header `X-Total-Count`)

@@ -7,8 +7,8 @@ chofer, no cómo entra al sistema ni a qué unidad está asignado ahora mismo.
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_roles
@@ -79,9 +79,20 @@ async def create_driver(
 
 @router.get("", response_model=list[DriverOut])
 async def list_drivers(
-    db: AsyncSession = Depends(get_db), _: User = Depends(staff_only)
+    response: Response,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
 ):
-    result = await db.execute(_driver_query().order_by(Driver.full_name))
+    """El total (antes de limit/offset) va en el header `X-Total-Count`, igual
+    que en /vehicles: el cuerpo se queda como lista plana."""
+    total = await db.scalar(select(func.count()).select_from(Driver))
+    response.headers["X-Total-Count"] = str(total)
+
+    result = await db.execute(
+        _driver_query().order_by(Driver.full_name).limit(limit).offset(offset)
+    )
     return [DriverOut(**row) for row in result.mappings().all()]
 
 

@@ -45,6 +45,10 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Sin esto el header queda en la respuesta pero es invisible para
+    # fetch()/XHR en el navegador: por CORS, solo un puñado de headers
+    # "simples" son legibles desde JS a menos que se expongan a propósito.
+    expose_headers=["X-Total-Count"],
 )
 
 app.include_router(auth.router, prefix="/api/v1")

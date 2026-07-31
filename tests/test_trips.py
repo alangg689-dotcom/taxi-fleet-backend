@@ -251,3 +251,25 @@ async def test_driver_without_trips_gets_empty_list(client, db_session):
     response = await client.get("/api/v1/trips", headers=auth_headers(driver_token))
     assert response.status_code == 200
     assert response.json() == []
+    assert response.headers["X-Total-Count"] == "0"
+
+
+async def test_list_trips_paginates_with_total_count_header(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    headers = auth_headers(operator_token)
+
+    for _ in range(5):
+        vehicle = await make_vehicle(db_session)
+        driver, _ = await make_driver(db_session)
+        await _dispatch(client, headers, vehicle.id, driver.id)
+
+    first_page = await client.get("/api/v1/trips?limit=2&offset=0", headers=headers)
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert int(first_page.headers["X-Total-Count"]) >= 5
+
+    second_page = await client.get("/api/v1/trips?limit=2&offset=2", headers=headers)
+    assert second_page.status_code == 200
+    first_ids = {t["id"] for t in first_page.json()}
+    second_ids = {t["id"] for t in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)

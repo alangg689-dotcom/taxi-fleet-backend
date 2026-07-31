@@ -109,6 +109,25 @@ async def test_get_unknown_driver_is_404(client, db_session):
     assert response.status_code == 404
 
 
+async def test_list_drivers_paginates_with_total_count_header(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    headers = auth_headers(operator_token)
+
+    for i in range(5):
+        await make_driver(db_session, phone=f"+52551122{i:04d}")
+
+    first_page = await client.get("/api/v1/drivers?limit=2&offset=0", headers=headers)
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 2
+    assert int(first_page.headers["X-Total-Count"]) >= 5
+
+    second_page = await client.get("/api/v1/drivers?limit=2&offset=2", headers=headers)
+    assert second_page.status_code == 200
+    first_ids = {d["id"] for d in first_page.json()}
+    second_ids = {d["id"] for d in second_page.json()}
+    assert first_ids.isdisjoint(second_ids)
+
+
 async def test_operator_can_set_operational_status(client, db_session):
     """DriverStatus (activo/inactivo operativo, ej. vacaciones) es distinto de
     User.is_active (login revocado): esto solo toca el primero."""
