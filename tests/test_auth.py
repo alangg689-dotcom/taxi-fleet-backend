@@ -29,6 +29,19 @@ async def test_login_wrong_password(client, db_session):
     assert response.status_code == 401
 
 
+async def test_login_rejects_password_over_bcrypt_byte_limit(client, db_session):
+    """bcrypt trunca en silencio todo lo que pase de 72 bytes: dos contraseñas
+    que compartan ese prefijo se autentican igual. Se rechaza con 422 antes de
+    llegar a password_hash, en vez de dejar que ese truncamiento pase inadvertido."""
+    await make_staff_user(db_session, email="op-largo@flotilla.mx")
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "op-largo@flotilla.mx", "password": "x" * 73},
+    )
+    assert response.status_code == 422
+
+
 async def test_driver_cannot_login_with_password(client, db_session):
     """Los choferes entran con teléfono + OTP; /login los rechaza aunque la
     contraseña sea correcta, para que no quede una ruta alterna sin OTP."""
