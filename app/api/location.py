@@ -8,7 +8,7 @@ de los buffers offline.
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from geoalchemy2 import Geometry
 from sqlalchemy import cast, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -169,12 +169,33 @@ async def nearby_vehicles(
 @router.get("/vehicles/{vehicle_id}/history", response_model=list[LocationOut])
 async def location_history(
     vehicle_id: uuid.UUID,
+    response: Response,
     since: datetime = Query(..., description="Inicio del rango (ISO 8601)"),
     until: datetime = Query(..., description="Fin del rango (ISO 8601)"),
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
-    """Recorrido de una unidad en un rango de fechas."""
+    """Recorrido de una unidad en un rango de fechas.
+
+    A diferencia de /vehicles, /drivers y /trips (default 50, tope 200), aquí
+    el default y el tope son más altos: con ~10-20 pings/segundo de toda la
+    flota, un rango de un día en una sola unidad ya son varios miles de filas,
+    y forzar el mismo tope de 200 haría inservible el endpoint para su uso
+    normal (dibujar una ruta completa). El total real (antes de limit/offset)
+    va en `X-Total-Count`, igual que en los demás listados.
+    """
+    conditions = (
+        LocationPing.vehicle_id == vehicle_id,
+        LocationPing.timestamp.between(since, until),
+    )
+
+    total = await db.scalar(
+        select(func.count()).select_from(LocationPing).where(*conditions)
+    )
+    response.headers["X-Total-Count"] = str(total)
+
     result = await db.execute(
         select(
             LocationPing.vehicle_id,
@@ -185,11 +206,10 @@ async def location_history(
             LocationPing.accuracy,
             LocationPing.timestamp,
         )
-        .where(
-            LocationPing.vehicle_id == vehicle_id,
-            LocationPing.timestamp.between(since, until),
-        )
+        .where(*conditions)
         .order_by(LocationPing.timestamp)
+        .limit(limit)
+        .offset(offset)
     )
     return [LocationOut(**row) for row in result.mappings().all()]
 

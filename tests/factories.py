@@ -6,11 +6,22 @@ ruido y tiempo de ejecución.
 """
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.location import _point
 from app.core.security import create_access_token, generate_token, hash_password, hash_token
-from app.models import Driver, DriverStatus, Operator, PermissionLevel, User, UserRole, Vehicle
+from app.models import (
+    Driver,
+    DriverStatus,
+    LocationPing,
+    Operator,
+    PermissionLevel,
+    User,
+    UserRole,
+    Vehicle,
+)
 
 DEFAULT_PASSWORD = "Password123"
 
@@ -78,6 +89,28 @@ async def make_vehicle(
     db.add(vehicle)
     await db.flush()
     return (vehicle, device_key) if with_device_key else vehicle
+
+
+async def make_location_ping(
+    db: AsyncSession,
+    *,
+    vehicle_id: uuid.UUID,
+    timestamp: datetime,
+    lat: float = 19.4326,
+    lng: float = -99.1332,
+) -> LocationPing:
+    ping = LocationPing(
+        id=uuid.uuid4(),
+        vehicle_id=vehicle_id,
+        location=_point(lat, lng),
+        speed=40.0,
+        heading=90.0,
+        accuracy=5.0,
+        timestamp=timestamp,
+    )
+    db.add(ping)
+    await db.flush()
+    return ping
 
 
 def auth_headers(token: str) -> dict[str, str]:
