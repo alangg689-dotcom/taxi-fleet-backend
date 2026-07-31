@@ -1,6 +1,6 @@
 """Schemas de entrada/salida del flujo de autenticación."""
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class OTPRequest(BaseModel):
@@ -17,6 +17,17 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8)
     device_info: str | None = Field(None, max_length=255)
+
+    @field_validator("password")
+    @classmethod
+    def _bcrypt_byte_limit(cls, v: str) -> str:
+        """bcrypt trunca en silencio todo lo que pase de 72 bytes (no
+        caracteres — un acento o emoji pesa varios bytes en UTF-8): dos
+        contraseñas que compartan esos primeros 72 bytes se autentican igual.
+        Se rechaza explícito en vez de dejar que password_hash trunque solo."""
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("La contraseña no puede superar los 72 bytes")
+        return v
 
 
 class RefreshRequest(BaseModel):
