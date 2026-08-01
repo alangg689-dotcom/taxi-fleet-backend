@@ -18,12 +18,26 @@ class Trip(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    vehicle_id: Mapped[uuid.UUID] = mapped_column(
+    # Nullable: un viaje despachado automáticamente nace sin saber todavía
+    # quién lo va a tomar (ver offered_driver_id más abajo). Un viaje creado
+    # a mano por un operador sí trae ambos desde el alta.
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("vehicles.id"), index=True
     )
-    driver_id: Mapped[uuid.UUID] = mapped_column(
+    driver_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("drivers.id"), index=True
     )
+
+    # A quién se le está ofreciendo el viaje ahora mismo mientras el motor de
+    # despacho recorre candidatos cercanos. Se limpia al aceptar (pasa a
+    # driver_id/vehicle_id), al rechazar, o al expirar.
+    offered_driver_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("drivers.id")
+    )
+    offered_vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("vehicles.id")
+    )
+    offer_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     origin: Mapped[str] = mapped_column(
         Geography(geometry_type="POINT", srid=4326, spatial_index=True)

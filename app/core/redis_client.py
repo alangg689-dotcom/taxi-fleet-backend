@@ -83,3 +83,15 @@ async def publish_location_update(payload: dict) -> None:
     await redis_client.publish(
         settings.LOCATION_CHANNEL, json.dumps(payload, default=str)
     )
+
+
+def driver_offer_channel(driver_id: str) -> str:
+    return f"driver:{driver_id}:offers"
+
+
+async def publish_trip_offer(driver_id: str, payload: dict) -> None:
+    """Empuja una oferta de viaje al chofer, sin importar a qué instancia del
+    backend esté conectado su WebSocket (mismo motivo que publish_location_update:
+    el motor de despacho puede correr en un servidor distinto al que tiene
+    abierta la conexión de ese chofer)."""
+    await redis_client.publish(driver_offer_channel(driver_id), json.dumps(payload, default=str))

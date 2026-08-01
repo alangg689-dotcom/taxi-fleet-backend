@@ -21,6 +21,7 @@ from app.models import (
     User,
     UserRole,
     Vehicle,
+    VehicleAssignment,
 )
 
 DEFAULT_PASSWORD = "Password123"
@@ -111,6 +112,17 @@ async def make_location_ping(
     db.add(ping)
     await db.flush()
     return ping
+
+
+async def make_open_assignment(
+    db: AsyncSession, *, vehicle_id: uuid.UUID, driver_id: uuid.UUID
+) -> VehicleAssignment:
+    """Turno abierto (ended_at=NULL): así el motor de despacho sabe qué
+    chofer está manejando esa unidad ahora mismo."""
+    assignment = VehicleAssignment(vehicle_id=vehicle_id, driver_id=driver_id)
+    db.add(assignment)
+    await db.flush()
+    return assignment
 
 
 def auth_headers(token: str) -> dict[str, str]:

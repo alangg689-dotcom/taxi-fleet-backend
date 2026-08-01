@@ -32,10 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _broadcast_latest, _persist_pings
 from app.config import settings
-from app.core.redis_client import get_all_last_positions, redis_client
+from app.core.redis_client import driver_offer_channel, get_all_last_positions, redis_client
 from app.core.security import decode_access_token, hash_token
 from app.database import get_db
-from app.models import UserRole, Vehicle
+from app.models import UserRole, Vehicle, VehicleAssignment
 from app.schemas.location import LocationPingIn
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,34 @@ class DashboardManager:
 
 
 manager = DashboardManager()
+
+
+async def _forward_trip_offers(websocket: WebSocket, driver_id: object) -> None:
+    """Tarea de fondo por conexión: reenvía al chofer las ofertas de viaje
+    que el motor de despacho (app.core.dispatch) le publique mientras esta
+    conexión siga abierta.
+
+    Mismo patrón que `redis_listener`, pero suscrito al canal de UN chofer en
+    particular en vez de al canal de flota completo — necesario porque el
+    motor de despacho puede correr en otra instancia del backend.
+    """
+    pubsub = redis_client.pubsub()
+    channel = driver_offer_channel(str(driver_id))
+    await pubsub.subscribe(channel)
+
+    try:
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            await websocket.send_text(
+                json.dumps({"type": "trip_offer", "data": json.loads(message["data"])})
+            )
+    except asyncio.CancelledError:
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            await pubsub.unsubscribe(channel)
+            await pubsub.aclose()
 
 
 async def redis_listener() -> None:
@@ -160,8 +188,24 @@ async def driver_socket(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # Turno abierto de esta unidad: si hay alguien manejándola ahora mismo,
+    # también recibe por este mismo socket las ofertas de viaje que le mande
+    # el motor de despacho (app.core.dispatch). Se resuelve una sola vez al
+    # conectar; un cambio de turno a media conexión no lo actualiza.
+    assignment_result = await db.execute(
+        select(VehicleAssignment.driver_id).where(
+            VehicleAssignment.vehicle_id == vehicle.id,
+            VehicleAssignment.ended_at.is_(None),
+        )
+    )
+    current_driver_id = assignment_result.scalar_one_or_none()
+
     await websocket.accept()
     logger.info("Chofer conectado; unidad %s", vehicle.plate)
+
+    offers_task: asyncio.Task | None = None
+    if current_driver_id is not None:
+        offers_task = asyncio.create_task(_forward_trip_offers(websocket, current_driver_id))
 
     try:
         while True:
@@ -191,3 +235,8 @@ async def driver_socket(
             )
     except WebSocketDisconnect:
         logger.info("Chofer desconectado; unidad %s", vehicle.plate)
+    finally:
+        if offers_task is not None:
+            offers_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await offers_task

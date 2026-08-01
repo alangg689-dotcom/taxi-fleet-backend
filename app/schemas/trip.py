@@ -8,7 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.enums import TripStatus
 
 
+def _check_destination_pair(lat: float | None, lng: float | None) -> None:
+    if (lat is None) != (lng is None):
+        raise ValueError("destination_lat y destination_lng deben ir juntos")
+
+
 class TripCreate(BaseModel):
+    """Alta manual: el operador ya eligió qué unidad y qué chofer despachar."""
+
     vehicle_id: UUID
     driver_id: UUID
     origin_lat: float = Field(..., ge=-90, le=90)
@@ -20,8 +27,24 @@ class TripCreate(BaseModel):
 
     @model_validator(mode="after")
     def _destination_pair(self) -> "TripCreate":
-        if (self.destination_lat is None) != (self.destination_lng is None):
-            raise ValueError("destination_lat y destination_lng deben ir juntos")
+        _check_destination_pair(self.destination_lat, self.destination_lng)
+        return self
+
+
+class TripDispatchCreate(BaseModel):
+    """Alta por despacho automático: sin vehicle_id/driver_id — el motor de
+    despacho busca y ofrece el viaje al chofer disponible más cercano."""
+
+    origin_lat: float = Field(..., ge=-90, le=90)
+    origin_lng: float = Field(..., ge=-180, le=180)
+    origin_address: str | None = Field(None, max_length=255)
+    destination_lat: float | None = Field(None, ge=-90, le=90)
+    destination_lng: float | None = Field(None, ge=-180, le=180)
+    destination_address: str | None = Field(None, max_length=255)
+
+    @model_validator(mode="after")
+    def _destination_pair(self) -> "TripDispatchCreate":
+        _check_destination_pair(self.destination_lat, self.destination_lng)
         return self
 
 
@@ -29,8 +52,8 @@ class TripOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    vehicle_id: UUID
-    driver_id: UUID
+    vehicle_id: UUID | None
+    driver_id: UUID | None
     origin_lat: float
     origin_lng: float
     origin_address: str | None
