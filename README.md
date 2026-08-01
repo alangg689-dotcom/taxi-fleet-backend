@@ -84,7 +84,7 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 **Telemetría** — `POST /location/ping` · `GET /vehicles/locations` (snapshot de flota) · `GET /vehicles/{id}/location` · `GET /vehicles/nearby?lat=&lng=&radius=` · `GET /vehicles/{id}/history?since=&until=` (paginado, default 500/tope 2000 — ver nota abajo) · `GET /vehicles/{id}/history/summary?since=&until=` (posición promedio cada 5 min, para rangos largos)
 
-**Viajes** — `POST /trips` (despacha unidad + chofer) · `GET /trips?status=&vehicle_id=&driver_id=` (paginado; staff ve toda la flota, un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
+**Viajes** — `POST /trips` (alta manual: el operador ya eligió unidad + chofer) · `POST /trips/dispatch` (despacho automático — ver abajo) · `GET /trips?status=&vehicle_id=&driver_id=` (paginado; staff ve toda la flota, un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/reject` (solo tiene efecto en el flujo de despacho) · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
 
 Los listados (`/vehicles`, `/drivers`, `/trips`) aceptan `limit` (default 50, máximo 200) y `offset`. `GET /vehicles/{id}/history` usa un default y un tope más altos (500/2000): con ~10-20 pings/segundo de toda la flota, un solo día de una unidad ya son varios miles de filas, y el tope de 200 de los demás listados lo haría inservible para su uso normal (dibujar una ruta completa). El total que coincide con los filtros —antes de aplicar `limit`/`offset`— va en el header de respuesta `X-Total-Count`, no en el cuerpo: así el JSON se queda como una lista plana y no rompe a nadie que ya lo consuma sin paginar. Ese header está expuesto por CORS (`Access-Control-Expose-Headers`) para que un dashboard en el navegador pueda leerlo con `fetch()`.
 
@@ -123,7 +123,7 @@ Del lote solo se difunde al mapa el ping más reciente: el dashboard únicamente
 
 ## Viajes
 
-No hay un "marketplace" de choferes disponibles: es una operadora despachando llamadas, así que `vehicle_id`/`driver_id` se capturan desde el alta del viaje, no después. El estado avanza así:
+Dos formas de crear un viaje: `POST /trips` es la de siempre (el operador ya eligió unidad y chofer), y `POST /trips/dispatch` no elige nada — nace con `vehicle_id`/`driver_id` en `null` y el motor de despacho busca por su cuenta a quién ofrecérselo. El estado avanza así:
 
 ```
 SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
@@ -131,7 +131,33 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
                                   \--cancel--> CANCELADO
 ```
 
-`accept`/`start`/`complete` los dispara normalmente la app del chofer (o el operador, en su nombre); `cancel` puede venir de cualquiera de los dos lados mientras el viaje no haya terminado. Un chofer solo puede actuar sobre sus propios viajes; operador/admin sobre cualquiera. Antes de crear un viaje se verifica que la unidad no tenga ya uno activo, para no despachar la misma unidad dos veces.
+`accept`/`start`/`complete` los dispara normalmente la app del chofer (o el operador, en su nombre); `cancel` puede venir de cualquiera de los dos lados mientras el viaje no haya terminado. Un chofer solo puede actuar sobre sus propios viajes; operador/admin sobre cualquiera. Antes de crear un viaje manual se verifica que la unidad no tenga ya uno activo, para no despachar la misma unidad dos veces.
+
+## Motor de despacho automático
+
+`POST /trips/dispatch` es el camino que en el futuro llamará un bot de WhatsApp (o cualquier canal que no sepa de antemano qué chofer va a tomar el viaje): recibe únicamente el origen/destino, y `app.core.dispatch` hace el resto.
+
+```
+POST /trips/dispatch  (sin vehicle_id/driver_id)
+        │
+        ▼
+find_candidate_drivers  — PostGIS ST_DWithin sobre el turno abierto
+        │                 más cercano con GPS reciente y sin otro viaje activo
+        ▼
+ofrece al más cercano ──PUBLISH──> Redis ──> WS /ws/driver del chofer (trip_offer)
+        │
+        │  chofer acepta ──POST /trips/{id}/accept──> ASIGNADO, fin
+        │  chofer rechaza ─POST /trips/{id}/reject──> siguiente candidato
+        │  no contesta en DISPATCH_OFFER_TIMEOUT_SECONDS (default 20s) ─> siguiente candidato
+        ▼
+   se acaban los candidatos → la oferta queda vacía, el viaje sigue "solicitado"
+```
+
+Quién cuenta como candidato para un viaje (`find_candidate_drivers`): tiene un turno abierto en `vehicle_assignments` (alguien la está manejando ahora mismo), esa unidad mandó un ping de GPS dentro de `DISPATCH_POSITION_FRESHNESS_SECONDS` (default 5 min) y dentro de `DISPATCH_SEARCH_RADIUS_METERS` (default 5 km) del origen, y no tiene ya otro viaje activo.
+
+La espera de respuesta (`_wait_for_response`) no usa Pub/Sub: es más simple releer el propio renglón de `trips` cada `DISPATCH_POLL_INTERVAL_SECONDS` que armar un segundo canal de eventos solo para esto. Pub/Sub sí hace falta para *empujar* la oferta al WebSocket del chofer (`driver:{id}:offers`), porque ese socket puede estar conectado a otra instancia del backend — mismo motivo que el resto del Pub/Sub del proyecto.
+
+El WebSocket `/ws/driver` ahora es bidireccional: además de recibir pings del chofer, se suscribe (mientras dura la conexión) al canal de ofertas del chofer que tenga el turno abierto de esa unidad, y le reenvía cualquier `trip_offer` que le llegue.
 
 ## Notas sobre el modelo de datos
 

@@ -12,6 +12,7 @@ así que vehicle_id/driver_id se capturan desde el alta. El estado avanza así:
 puede venir de cualquiera de los dos lados.
 """
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -22,9 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _point
 from app.core.deps import require_roles
+from app.core.dispatch import dispatch_trip
 from app.database import get_db
 from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle
-from app.schemas.trip import TripCreate, TripOut
+from app.schemas.trip import TripCreate, TripDispatchCreate, TripOut
 
 router = APIRouter(prefix="/trips", tags=["viajes"])
 
@@ -79,6 +81,16 @@ async def _get_trip_or_404(db: AsyncSession, trip_id: uuid.UUID) -> Trip:
     return trip
 
 
+async def _get_own_driver_or_403(db: AsyncSession, user: User) -> Driver:
+    if user.role != UserRole.DRIVER:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Esta acción es solo para choferes")
+    result = await db.execute(select(Driver).where(Driver.user_id == user.id))
+    driver = result.scalar_one_or_none()
+    if driver is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Esta acción es solo para choferes")
+    return driver
+
+
 def _apply_transition(trip: Trip, expected: TripStatus, new: TripStatus) -> None:
     if trip.status != expected:
         raise HTTPException(
@@ -123,6 +135,42 @@ async def create_trip(
     db.add(trip)
     await db.flush()
     return await _get_trip_out(db, trip.id)
+
+
+@router.post("/dispatch", response_model=TripOut, status_code=status.HTTP_201_CREATED)
+async def dispatch_new_trip(
+    payload: TripDispatchCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Crea un viaje SIN elegir unidad/chofer: el motor de despacho busca al
+    chofer disponible más cercano y se lo ofrece, en cascada, hasta que
+    alguien acepte. `staff_only` por ahora — es el mismo camino que más
+    adelante llamará un bot de WhatsApp, pero internamente (sin pasar por
+    este endpoint HTTP con auth de operador).
+
+    La respuesta llega de inmediato con el viaje en 'solicitado' y sin
+    driver_id todavía; el resultado del despacho se ve consultando
+    GET /trips/{id} más tarde (pasa a 'asignado' si alguien acepta).
+    """
+    destination = (
+        _point(payload.destination_lat, payload.destination_lng)
+        if payload.destination_lat is not None
+        else None
+    )
+    trip = Trip(
+        origin=_point(payload.origin_lat, payload.origin_lng),
+        origin_address=payload.origin_address,
+        destination=destination,
+        destination_address=payload.destination_address,
+    )
+    db.add(trip)
+    await db.flush()
+    trip_id = trip.id
+    await db.commit()
+
+    asyncio.create_task(dispatch_trip(trip_id))
+    return await _get_trip_out(db, trip_id)
 
 
 @router.get("", response_model=list[TripOut])
@@ -195,10 +243,55 @@ async def accept_trip(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(driver_or_staff),
 ):
-    """El chofer confirma que toma el viaje asignado."""
+    """El chofer confirma que toma el viaje.
+
+    Dos caminos posibles: si el viaje ya trae driver_id (alta manual de un
+    operador), es la confirmación de siempre. Si no lo trae (lo creó el
+    motor de despacho), solo puede aceptar el chofer al que se le está
+    ofreciendo *ahora mismo* (offered_driver_id) — es quien recibió el
+    trip_offer por su WebSocket.
+    """
     trip = await _get_trip_or_404(db, trip_id)
-    await _authorize_trip(trip, user, db)
-    _apply_transition(trip, TripStatus.SOLICITADO, TripStatus.ASIGNADO)
+
+    if trip.driver_id is not None:
+        await _authorize_trip(trip, user, db)
+        _apply_transition(trip, TripStatus.SOLICITADO, TripStatus.ASIGNADO)
+        return await _get_trip_out(db, trip_id)
+
+    driver = await _get_own_driver_or_403(db, user)
+    if trip.offered_driver_id != driver.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes una oferta activa para este viaje")
+    if trip.offer_expires_at is not None and trip.offer_expires_at < datetime.now(UTC):
+        raise HTTPException(status.HTTP_409_CONFLICT, "La oferta de este viaje ya expiró")
+
+    trip.driver_id = trip.offered_driver_id
+    trip.vehicle_id = trip.offered_vehicle_id
+    trip.status = TripStatus.ASIGNADO
+    trip.offered_driver_id = None
+    trip.offered_vehicle_id = None
+    trip.offer_expires_at = None
+    return await _get_trip_out(db, trip_id)
+
+
+@router.post("/{trip_id}/reject", response_model=TripOut)
+async def reject_trip(
+    trip_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_or_staff),
+):
+    """Solo tiene sentido en el flujo de despacho automático: el chofer al
+    que se le ofreció el viaje declina, y el motor de despacho (que está
+    esperando este cambio) pasa al siguiente candidato sin agotar el
+    timeout completo."""
+    trip = await _get_trip_or_404(db, trip_id)
+    driver = await _get_own_driver_or_403(db, user)
+
+    if trip.offered_driver_id != driver.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes una oferta activa para este viaje")
+
+    trip.offered_driver_id = None
+    trip.offered_vehicle_id = None
+    trip.offer_expires_at = None
     return await _get_trip_out(db, trip_id)
 
 

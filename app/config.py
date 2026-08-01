@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
 
+    # --- Motor de despacho automático ---
+    DISPATCH_OFFER_TIMEOUT_SECONDS: int = 20   # tiempo para aceptar/rechazar antes de pasar al siguiente
+    DISPATCH_SEARCH_RADIUS_METERS: int = 5000  # radio de búsqueda de unidades candidatas
+    DISPATCH_MAX_CANDIDATES: int = 10          # tope de candidatos a recorrer por viaje
+    DISPATCH_POSITION_FRESHNESS_SECONDS: int = 300  # un ping más viejo que esto no cuenta como "en línea"
+    DISPATCH_POLL_INTERVAL_SECONDS: float = 1.0     # cada cuánto se revisa si ya respondieron
+
     @property
     def cors_origins(self) -> list[str]:
         if self.CORS_ORIGINS == "*":
