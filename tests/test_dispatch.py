@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.api.location import _point
 from app.core.dispatch import find_candidate_drivers
-from app.models import Trip, TripStatus, UserRole
+from app.models import Trip, TripStatus, UserRole, VehicleStatus
 from tests.factories import (
     auth_headers,
     make_driver,
@@ -51,14 +51,14 @@ async def _make_trip(db_session, *, origin=_ORIGIN, status=TripStatus.SOLICITADO
 async def test_find_candidates_orders_by_distance(db_session):
     trip = await _make_trip(db_session)
 
-    far_vehicle = await make_vehicle(db_session)
+    far_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     far_driver, _ = await make_driver(db_session)
     await make_open_assignment(db_session, vehicle_id=far_vehicle.id, driver_id=far_driver.id)
     await make_location_ping(
         db_session, vehicle_id=far_vehicle.id, timestamp=datetime.now(UTC), lat=19.45, lng=-99.10
     )
 
-    near_vehicle = await make_vehicle(db_session)
+    near_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     near_driver, _ = await make_driver(db_session)
     await make_open_assignment(db_session, vehicle_id=near_vehicle.id, driver_id=near_driver.id)
     await make_location_ping(
@@ -73,7 +73,7 @@ async def test_find_candidates_orders_by_distance(db_session):
 
 async def test_find_candidates_excludes_stale_ping(db_session):
     trip = await _make_trip(db_session)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, _ = await make_driver(db_session)
     await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
     await make_location_ping(
@@ -90,7 +90,7 @@ async def test_find_candidates_excludes_stale_ping(db_session):
 
 async def test_find_candidates_excludes_out_of_radius(db_session):
     trip = await _make_trip(db_session)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, _ = await make_driver(db_session)
     await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
     # Puebla, a ~100km del Zócalo — muy fuera del radio de búsqueda default.
@@ -104,7 +104,7 @@ async def test_find_candidates_excludes_out_of_radius(db_session):
 
 async def test_find_candidates_excludes_vehicle_without_open_assignment(db_session):
     trip = await _make_trip(db_session)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     await make_location_ping(
         db_session, vehicle_id=vehicle.id, timestamp=datetime.now(UTC), lat=19.433, lng=-99.134
     )
@@ -116,13 +116,29 @@ async def test_find_candidates_excludes_vehicle_without_open_assignment(db_sessi
 
 async def test_find_candidates_excludes_vehicle_with_active_trip(db_session):
     trip = await _make_trip(db_session)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, _ = await make_driver(db_session)
     await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
     await make_location_ping(
         db_session, vehicle_id=vehicle.id, timestamp=datetime.now(UTC), lat=19.433, lng=-99.134
     )
     await _make_trip(db_session, vehicle_id=vehicle.id, driver_id=driver.id, status=TripStatus.EN_CURSO)
+
+    candidates = await find_candidate_drivers(db_session, trip.id)
+    assert candidates == []
+
+
+async def test_find_candidates_excludes_vehicle_not_disponible(db_session):
+    """El chofer se marcó 'ocupado' a mano (corte de calle) — el motor de
+    despacho no debe ofrecerle nada aunque el resto de las condiciones se
+    cumplan."""
+    trip = await _make_trip(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.OCUPADO)
+    driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    await make_location_ping(
+        db_session, vehicle_id=vehicle.id, timestamp=datetime.now(UTC), lat=19.433, lng=-99.134
+    )
 
     candidates = await find_candidate_drivers(db_session, trip.id)
     assert candidates == []

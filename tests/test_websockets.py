@@ -88,6 +88,23 @@ async def test_driver_socket_rejects_unknown_device_key(ws_client_factory, db_se
         assert exc_info.value.code == 1008
 
 
+async def test_driver_socket_sends_connected_with_vehicle_id_and_status(
+    ws_client_factory, db_session
+):
+    """La app no tiene otra forma de saber su propio vehicle_id (device_key no
+    es un JWT) — lo necesita para POST /vehicles/{id}/status (corte de calle)."""
+    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+
+    async with ws_client_factory() as ws_client:
+        async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            connected = await ws.receive_json()
+            assert connected == {
+                "type": "connected",
+                "vehicle_id": str(vehicle.id),
+                "vehicle_status": "disponible",
+            }
+
+
 async def test_driver_socket_accepts_valid_device_key_and_persists_ping(
     ws_client_factory, db_session
 ):
@@ -95,6 +112,7 @@ async def test_driver_socket_accepts_valid_device_key_and_persists_ping(
 
     async with ws_client_factory() as ws_client:
         async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
             await ws.send_json(_ping())
             ack = await ws.receive_json()
             assert ack == {"type": "ack", "accepted": 1, "received": 1}
@@ -115,6 +133,7 @@ async def test_driver_socket_accepts_batch_and_dedupes_by_timestamp(
 
     async with ws_client_factory() as ws_client:
         async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
             await ws.send_json([_ping(timestamp=shared_ts), _ping(timestamp=shared_ts)])
             ack = await ws.receive_json()
             assert ack == {"type": "ack", "accepted": 1, "received": 2}
@@ -127,6 +146,7 @@ async def test_driver_socket_reports_malformed_ping_without_closing(
 
     async with ws_client_factory() as ws_client:
         async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
             await ws.send_json({"lat": "no-es-un-numero"})
             error = await ws.receive_json()
             assert error["type"] == "error"
@@ -162,6 +182,7 @@ async def test_driver_ping_broadcasts_to_fleet_dashboard(ws_client_factory, db_s
                 async with aconnect_ws(
                     f"/ws/driver?device_key={device_key}", ws_client
                 ) as driver_ws:
+                    await driver_ws.receive_json()  # connected
                     await driver_ws.send_json(_ping())
                     await driver_ws.receive_json()  # ack
 
@@ -186,6 +207,7 @@ async def test_driver_socket_uses_savepoint_session_not_a_separate_connection(
 
     async with ws_client_factory() as ws_client:
         async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
             await ws.send_json(_ping())
             await ws.receive_json()
 

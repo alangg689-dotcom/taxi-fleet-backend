@@ -35,7 +35,7 @@ from app.config import settings
 from app.core.redis_client import driver_offer_channel, get_all_last_positions, redis_client
 from app.core.security import decode_access_token, hash_token
 from app.database import get_db
-from app.models import UserRole, Vehicle, VehicleAssignment
+from app.models import UserRole, Vehicle, VehicleAssignment, VehicleStatus
 from app.schemas.location import LocationPingIn
 
 logger = logging.getLogger(__name__)
@@ -188,6 +188,13 @@ async def driver_socket(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # Conectarse pone la unidad "disponible" para el motor de despacho, salvo
+    # que el chofer ya la haya marcado "ocupado" a mano (corte de calle) o
+    # esté offline/mantenimiento por decisión de un operador — eso no se pisa.
+    if vehicle.status == VehicleStatus.OFFLINE:
+        vehicle.status = VehicleStatus.DISPONIBLE
+        await db.commit()
+
     # Turno abierto de esta unidad: si hay alguien manejándola ahora mismo,
     # también recibe por este mismo socket las ofertas de viaje que le mande
     # el motor de despacho (app.core.dispatch). Se resuelve una sola vez al
@@ -202,6 +209,19 @@ async def driver_socket(
 
     await websocket.accept()
     logger.info("Chofer conectado; unidad %s", vehicle.plate)
+
+    # La app no tiene otra forma de enterarse de su propio vehicle_id/status
+    # (device_key no es un JWT, no trae claims) — se lo manda una vez al
+    # conectar para que pueda usar POST /vehicles/{id}/status (corte de calle).
+    await websocket.send_text(
+        json.dumps(
+            {
+                "type": "connected",
+                "vehicle_id": str(vehicle.id),
+                "vehicle_status": vehicle.status.value,
+            }
+        )
+    )
 
     offers_task: asyncio.Task | None = None
     if current_driver_id is not None:

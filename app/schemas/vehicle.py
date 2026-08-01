@@ -1,6 +1,7 @@
 """Schemas de vehículos y asignaciones de turno."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +19,15 @@ class VehicleUpdate(BaseModel):
     model: str | None = None
     year: int | None = None
     status: VehicleStatus | None = None
+
+
+class VehicleStatusUpdate(BaseModel):
+    """A diferencia de VehicleUpdate (solo staff), esto lo puede mandar el
+    propio chofer — por eso solo acepta disponible/ocupado: para el corte de
+    calle sin pasar por operador ni bot. offline/mantenimiento siguen siendo
+    decisión de un operador."""
+
+    status: Literal[VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO]
 
 
 class VehicleOut(BaseModel):

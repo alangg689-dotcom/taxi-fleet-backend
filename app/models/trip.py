@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geography
-from sqlalchemy import DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -58,3 +58,9 @@ class Trip(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Lo que cobró el chofer, capturado a mano al completar el viaje — no hay
+    # tarifa calculada automáticamente (ni por distancia ni por tiempo) en
+    # este proyecto. Sirve para que el chofer lleve su propio registro de
+    # ingresos, no para facturar al pasajero.
+    fare: Mapped[float | None] = mapped_column(Float)

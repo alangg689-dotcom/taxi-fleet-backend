@@ -17,6 +17,7 @@ from app.schemas.vehicle import (
     VehicleCreate,
     VehicleCreated,
     VehicleOut,
+    VehicleStatusUpdate,
     VehicleUpdate,
 )
 
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/vehicles", tags=["vehicles"])
 
 staff_only = require_roles(UserRole.OPERATOR, UserRole.ADMIN)
 admin_only = require_roles(UserRole.ADMIN)
+driver_or_staff = require_roles(UserRole.DRIVER, UserRole.OPERATOR, UserRole.ADMIN)
 
 
 @router.get("", response_model=list[VehicleOut])
@@ -106,6 +108,39 @@ async def update_vehicle(
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(vehicle, field, value)
+    return vehicle
+
+
+@router.post("/{vehicle_id}/status", response_model=VehicleOut)
+async def set_vehicle_status(
+    vehicle_id: uuid.UUID,
+    payload: VehicleStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_or_staff),
+):
+    """A diferencia de PATCH /vehicles/{id} (solo staff, cualquier campo),
+    esto lo puede mandar el propio chofer para marcarse disponible/ocupado
+    él solo — pensado para el corte de calle: un pasajero que para el taxi
+    directo, sin pasar por operador ni por el motor de despacho. Un chofer
+    solo puede tocar la unidad que tiene asignada en su turno actual."""
+    vehicle = await db.get(Vehicle, vehicle_id)
+    if vehicle is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
+
+    if user.role == UserRole.DRIVER:
+        own_driver = await db.execute(select(Driver).where(Driver.user_id == user.id))
+        driver = own_driver.scalar_one_or_none()
+        assignment = await db.execute(
+            select(VehicleAssignment).where(
+                VehicleAssignment.vehicle_id == vehicle_id,
+                VehicleAssignment.ended_at.is_(None),
+            )
+        )
+        current = assignment.scalar_one_or_none()
+        if driver is None or current is None or current.driver_id != driver.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes el turno de esta unidad")
+
+    vehicle.status = payload.status
     return vehicle
 
 

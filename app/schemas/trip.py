@@ -48,6 +48,13 @@ class TripDispatchCreate(BaseModel):
         return self
 
 
+class TripComplete(BaseModel):
+    """Lo que cobró el chofer — a mano, no hay cálculo automático de tarifa.
+    Opcional: no todos los operadores van a querer llevar este registro."""
+
+    fare: float | None = Field(None, ge=0)
+
+
 class TripOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +71,7 @@ class TripOut(BaseModel):
     requested_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    fare: float | None
     # A quién le está ofreciendo el viaje el motor de despacho ahora mismo
     # (app.core.dispatch); null si el viaje no nació de /trips/dispatch, si
     # ya lo aceptó alguien, o si se acabaron los candidatos.
