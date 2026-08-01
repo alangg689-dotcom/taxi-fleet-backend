@@ -213,12 +213,15 @@ async def driver_socket(
     # La app no tiene otra forma de enterarse de su propio vehicle_id/status
     # (device_key no es un JWT, no trae claims) — se lo manda una vez al
     # conectar para que pueda usar POST /vehicles/{id}/status (corte de calle).
+    # `vehicle_plate` es solo para mostrarle al chofer qué unidad es (pantalla
+    # de inicio de la app), no tiene otro uso.
     await websocket.send_text(
         json.dumps(
             {
                 "type": "connected",
                 "vehicle_id": str(vehicle.id),
                 "vehicle_status": vehicle.status.value,
+                "vehicle_plate": vehicle.plate,
             }
         )
     )

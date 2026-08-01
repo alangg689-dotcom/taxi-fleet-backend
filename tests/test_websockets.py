@@ -102,6 +102,7 @@ async def test_driver_socket_sends_connected_with_vehicle_id_and_status(
                 "type": "connected",
                 "vehicle_id": str(vehicle.id),
                 "vehicle_status": "disponible",
+                "vehicle_plate": vehicle.plate,
             }
 
 
