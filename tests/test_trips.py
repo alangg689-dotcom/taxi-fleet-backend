@@ -1,6 +1,6 @@
 import uuid
 
-from app.models import UserRole
+from app.models import UserRole, VehicleStatus
 from tests.factories import auth_headers, make_driver, make_staff_user, make_vehicle
 
 
@@ -123,6 +123,86 @@ async def test_full_lifecycle_accept_start_complete(client, db_session):
     assert completed.status_code == 200
     assert completed.json()["status"] == "completado"
     assert completed.json()["completed_at"] is not None
+
+
+async def test_accept_marks_vehicle_ocupado_and_complete_frees_it(client, db_session):
+    """El chofer no tiene que acordarse de marcarse ocupado/disponible a mano
+    durante un viaje despachado por la app: accept/complete lo hacen solos."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
+    driver, driver_token = await make_driver(db_session)
+    driver_headers = auth_headers(driver_token)
+
+    created = await _dispatch(
+        client, auth_headers(operator_token), vehicle.id, driver.id
+    )
+    trip_id = created.json()["id"]
+
+    await client.post(f"/api/v1/trips/{trip_id}/accept", headers=driver_headers)
+    await db_session.refresh(vehicle)
+    assert vehicle.status == VehicleStatus.OCUPADO
+
+    await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
+    completed = await client.post(
+        f"/api/v1/trips/{trip_id}/complete",
+        json={"fare": 85.5},
+        headers=driver_headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["fare"] == 85.5
+
+    await db_session.refresh(vehicle)
+    assert vehicle.status == VehicleStatus.DISPONIBLE
+
+
+async def test_complete_without_fare_leaves_it_null(client, db_session):
+    """`fare` es opcional: no todos los operadores van a querer llevar este
+    registro."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session)
+    driver, driver_token = await make_driver(db_session)
+    driver_headers = auth_headers(driver_token)
+
+    created = await _dispatch(
+        client, auth_headers(operator_token), vehicle.id, driver.id
+    )
+    trip_id = created.json()["id"]
+    await client.post(f"/api/v1/trips/{trip_id}/accept", headers=driver_headers)
+    await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
+
+    completed = await client.post(f"/api/v1/trips/{trip_id}/complete", headers=driver_headers)
+    assert completed.status_code == 200
+    assert completed.json()["fare"] is None
+
+
+async def test_cancel_frees_vehicle_marked_ocupado(client, db_session):
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.OCUPADO)
+    driver, _ = await make_driver(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    headers = auth_headers(operator_token)
+
+    created = await _dispatch(client, headers, vehicle.id, driver.id)
+    trip_id = created.json()["id"]
+
+    cancelled = await client.post(f"/api/v1/trips/{trip_id}/cancel", headers=headers)
+    assert cancelled.status_code == 200
+
+    await db_session.refresh(vehicle)
+    assert vehicle.status == VehicleStatus.DISPONIBLE
+
+
+async def test_accept_does_not_touch_vehicle_in_mantenimiento(client, db_session):
+    """_set_vehicle_status no debe pisar un estado que decidió un operador."""
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.MANTENIMIENTO)
+    driver, driver_token = await make_driver(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    created = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+    trip_id = created.json()["id"]
+
+    await client.post(f"/api/v1/trips/{trip_id}/accept", headers=auth_headers(driver_token))
+    await db_session.refresh(vehicle)
+    assert vehicle.status == VehicleStatus.MANTENIMIENTO
 
 
 async def test_cannot_skip_states_out_of_order(client, db_session):

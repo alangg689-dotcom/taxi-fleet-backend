@@ -22,6 +22,7 @@ from app.models import (
     UserRole,
     Vehicle,
     VehicleAssignment,
+    VehicleStatus,
 )
 
 DEFAULT_PASSWORD = "Password123"
@@ -76,15 +77,22 @@ async def make_driver(
 
 
 async def make_vehicle(
-    db: AsyncSession, *, plate: str | None = None, with_device_key: bool = False
+    db: AsyncSession,
+    *,
+    plate: str | None = None,
+    with_device_key: bool = False,
+    status: VehicleStatus = VehicleStatus.OFFLINE,
 ) -> Vehicle | tuple[Vehicle, str]:
     """Con with_device_key=True devuelve (vehicle, device_key crudo): igual que
-    el alta real, el hash es lo único que queda en la base."""
+    el alta real, el hash es lo único que queda en la base. `status` default
+    offline, igual que el alta real — el motor de despacho solo considera
+    'disponible' (ver test_dispatch.py)."""
     plate = plate or f"TST-{uuid.uuid4().hex[:6].upper()}"
     device_key = generate_token() if with_device_key else None
     vehicle = Vehicle(
         plate=plate,
         model="Vehículo de prueba",
+        status=status,
         device_key_hash=hash_token(device_key) if device_key else None,
     )
     db.add(vehicle)

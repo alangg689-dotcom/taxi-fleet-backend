@@ -25,8 +25,8 @@ from app.api.location import _point
 from app.core.deps import require_roles
 from app.core.dispatch import dispatch_trip
 from app.database import get_db
-from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle
-from app.schemas.trip import TripCreate, TripDispatchCreate, TripOut
+from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleStatus
+from app.schemas.trip import TripComplete, TripCreate, TripDispatchCreate, TripOut
 
 router = APIRouter(prefix="/trips", tags=["viajes"])
 
@@ -56,6 +56,7 @@ def _trip_columns():
         Trip.requested_at,
         Trip.started_at,
         Trip.completed_at,
+        Trip.fare,
         Trip.offered_driver_id,
         Trip.offered_vehicle_id,
         Trip.offer_expires_at,
@@ -92,6 +93,16 @@ async def _get_own_driver_or_403(db: AsyncSession, user: User) -> Driver:
     if driver is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Esta acción es solo para choferes")
     return driver
+
+
+async def _set_vehicle_status(db: AsyncSession, vehicle_id: uuid.UUID | None, status_: VehicleStatus) -> None:
+    """No toca offline/mantenimiento — esos son decisión de un operador, no
+    algo que el ciclo de vida de un viaje deba pisar."""
+    if vehicle_id is None:
+        return
+    vehicle = await db.get(Vehicle, vehicle_id)
+    if vehicle is not None and vehicle.status in (VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO):
+        vehicle.status = status_
 
 
 def _apply_transition(trip: Trip, expected: TripStatus, new: TripStatus) -> None:
@@ -259,6 +270,7 @@ async def accept_trip(
     if trip.driver_id is not None:
         await _authorize_trip(trip, user, db)
         _apply_transition(trip, TripStatus.SOLICITADO, TripStatus.ASIGNADO)
+        await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
         return await _get_trip_out(db, trip_id)
 
     driver = await _get_own_driver_or_403(db, user)
@@ -273,6 +285,7 @@ async def accept_trip(
     trip.offered_driver_id = None
     trip.offered_vehicle_id = None
     trip.offer_expires_at = None
+    await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
     return await _get_trip_out(db, trip_id)
 
 
@@ -315,13 +328,19 @@ async def start_trip(
 @router.post("/{trip_id}/complete", response_model=TripOut)
 async def complete_trip(
     trip_id: uuid.UUID,
+    payload: TripComplete = TripComplete(),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(driver_or_staff),
 ):
+    """`fare` es opcional: lo que cobró el chofer, a mano — para que pueda
+    llevar su propio registro de ingresos en la app. No es un cobro real ni
+    se calcula solo."""
     trip = await _get_trip_or_404(db, trip_id)
     await _authorize_trip(trip, user, db)
     _apply_transition(trip, TripStatus.EN_CURSO, TripStatus.COMPLETADO)
     trip.completed_at = datetime.now(UTC)
+    trip.fare = payload.fare
+    await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE)
     return await _get_trip_out(db, trip_id)
 
 
@@ -338,4 +357,5 @@ async def cancel_trip(
             status.HTTP_409_CONFLICT, f"El viaje ya está '{trip.status.value}'"
         )
     trip.status = TripStatus.CANCELADO
+    await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE)
     return await _get_trip_out(db, trip_id)

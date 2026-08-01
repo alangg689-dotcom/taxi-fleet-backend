@@ -78,7 +78,7 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 **Auth** — `POST /auth/otp/request` · `/auth/otp/verify` · `/auth/login` · `/auth/refresh` · `/auth/logout`
 
-**Vehículos** — `GET|POST /vehicles` (paginado, ver abajo) · `GET|PATCH /vehicles/{id}` · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close`
+**Vehículos** — `GET|POST /vehicles` (paginado, ver abajo) · `GET|PATCH /vehicles/{id}` (solo staff, cualquier campo) · `POST /vehicles/{id}/status` (el propio chofer puede marcar su unidad disponible/ocupado — ver abajo) · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close`
 
 **Choferes** — `GET|POST /drivers` (alta solo admin; listado paginado) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin)
 
@@ -132,6 +132,19 @@ SOLICITADO --accept--> ASIGNADO --start--> EN_CURSO --complete--> COMPLETADO
 ```
 
 `accept`/`start`/`complete` los dispara normalmente la app del chofer (o el operador, en su nombre); `cancel` puede venir de cualquiera de los dos lados mientras el viaje no haya terminado. Un chofer solo puede actuar sobre sus propios viajes; operador/admin sobre cualquiera. Antes de crear un viaje manual se verifica que la unidad no tenga ya uno activo, para no despachar la misma unidad dos veces.
+
+`POST /trips/{id}/complete` acepta un body opcional `{"fare": 85.5}`: lo que cobró el chofer, capturado a mano — no hay tarifa calculada por distancia ni por tiempo en este proyecto. Sirve para que el chofer lleve su propio registro de ingresos (día/semana/mes) desde la app, no para facturar al pasajero. Si se omite, `fare` queda en `null`.
+
+## `Vehicle.status` y el corte de calle
+
+`Vehicle.status` (`disponible` / `ocupado` / `offline` / `mantenimiento`) es lo que de verdad decide si una unidad es candidata en `find_candidate_drivers`; solo `disponible` cuenta. Se mueve solo en estos momentos:
+
+- **Al conectar `/ws/driver`**: si estaba `offline`, pasa a `disponible`. Es la señal de "el chofer prendió la app".
+- **`POST /trips/{id}/accept`**: pasa a `ocupado` (ya sea que el viaje lo haya creado un operador o el motor de despacho).
+- **`POST /trips/{id}/complete`** y **`POST /trips/{id}/cancel`**: vuelve a `disponible`.
+- **`POST /vehicles/{id}/status`**: el propio chofer la pone en `disponible`/`ocupado` a mano, pensado para el corte de calle — un pasajero que para el taxi en la calle, sin pasar por operador ni por el motor de despacho. Solo puede tocar la unidad de su turno abierto actual (`vehicle_assignments.ended_at IS NULL`); staff/admin pueden tocar cualquiera.
+
+Ninguna de las transiciones automáticas (conectar, accept, complete, cancel) pisa `offline`/`mantenimiento`: esos dos siguen siendo decisión exclusiva de un operador vía `PATCH /vehicles/{id}`.
 
 ## Motor de despacho automático
 

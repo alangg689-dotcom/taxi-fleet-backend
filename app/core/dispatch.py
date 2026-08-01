@@ -8,6 +8,11 @@ Quién cuenta como "candidato" para un viaje:
   2. Esa unidad mandó un ping de GPS reciente (DISPATCH_POSITION_FRESHNESS_SECONDS)
      dentro del radio de búsqueda del origen del viaje.
   3. Esa unidad no tiene ya otro viaje activo (solicitado/asignado/en_curso).
+  4. Vehicle.status == 'disponible' — el chofer no la marcó "ocupado" a mano
+     (ver POST /vehicles/{id}/status, pensado para un corte de calle) ni está
+     offline/en mantenimiento. /ws/driver la pone en "disponible" en cuanto
+     el chofer conecta (si estaba offline), y accept/complete la mueven entre
+     ocupado/disponible automáticamente durante un viaje despachado por la app.
 
 El "ofrecer y esperar" no usa Pub/Sub para la respuesta: es más simple leer
 el propio renglón de trips cada DISPATCH_POLL_INTERVAL_SECONDS que armar un
@@ -58,6 +63,7 @@ async def find_candidate_drivers(db: AsyncSession, trip_id: uuid.UUID) -> list[C
             JOIN location_pings p ON true
             JOIN vehicle_assignments va
                 ON va.vehicle_id = p.vehicle_id AND va.ended_at IS NULL
+            JOIN vehicles v ON v.id = p.vehicle_id AND v.status = 'disponible'
             WHERE t.id = :trip_id
               AND p.timestamp > now() - make_interval(secs => :freshness)
               AND ST_DWithin(p.location, t.origin, :radius)
