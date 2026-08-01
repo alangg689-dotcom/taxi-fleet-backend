@@ -189,6 +189,28 @@ async def test_offered_driver_can_accept(client, db_session):
     assert body["status"] == "asignado"
     assert body["driver_id"] == str(driver.id)
     assert body["vehicle_id"] == str(vehicle.id)
+    # El dashboard deja de mostrar "ofreciendo a..." en cuanto se asigna.
+    assert body["offered_driver_id"] is None
+    assert body["offered_vehicle_id"] is None
+    assert body["offer_expires_at"] is None
+
+
+async def test_trip_out_exposes_current_offer_for_the_dashboard(client, db_session):
+    """El operador necesita ver a quién se le está ofreciendo el viaje ahora
+    mismo mientras el motor de despacho recorre candidatos."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    vehicle = await make_vehicle(db_session)
+    driver, _ = await make_driver(db_session)
+    trip = await _make_offered_trip(db_session, driver_id=driver.id, vehicle_id=vehicle.id)
+
+    response = await client.get(
+        f"/api/v1/trips/{trip.id}", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["offered_driver_id"] == str(driver.id)
+    assert body["offered_vehicle_id"] == str(vehicle.id)
+    assert body["offer_expires_at"] is not None
 
 
 async def test_other_driver_cannot_accept_someone_elses_offer(client, db_session):

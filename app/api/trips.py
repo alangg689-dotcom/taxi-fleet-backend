@@ -56,6 +56,9 @@ def _trip_columns():
         Trip.requested_at,
         Trip.started_at,
         Trip.completed_at,
+        Trip.offered_driver_id,
+        Trip.offered_vehicle_id,
+        Trip.offer_expires_at,
     )
 
 
