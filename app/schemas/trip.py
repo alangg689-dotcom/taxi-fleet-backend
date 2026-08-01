@@ -64,3 +64,9 @@ class TripOut(BaseModel):
     requested_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    # A quién le está ofreciendo el viaje el motor de despacho ahora mismo
+    # (app.core.dispatch); null si el viaje no nació de /trips/dispatch, si
+    # ya lo aceptó alguien, o si se acabaron los candidatos.
+    offered_driver_id: UUID | None
+    offered_vehicle_id: UUID | None
+    offer_expires_at: datetime | None
