@@ -172,6 +172,8 @@ La espera de respuesta (`_wait_for_response`) no usa Pub/Sub: es más simple rel
 
 El WebSocket `/ws/driver` ahora es bidireccional: además de recibir pings del chofer, se suscribe (mientras dura la conexión) al canal de ofertas del chofer que tenga el turno abierto de esa unidad, y le reenvía cualquier `trip_offer` que le llegue.
 
+Al aceptar la conexión manda, antes que nada, un mensaje `{"type": "connected", "vehicle_id": ..., "vehicle_status": ...}`: es la única forma que tiene la app de enterarse de su propio `vehicle_id` (el `device_key` no es un JWT, no trae claims), y lo necesita para llamar `POST /vehicles/{id}/status` (corte de calle).
+
 ## Notas sobre el modelo de datos
 
 - **`VEHICLE_ASSIGNMENT` en vez de `current_driver_id`.** Una columna suelta pierde el historial en cuanto rota el segundo chofer. Con `started_at`/`ended_at` queda la trazabilidad completa de turnos; el chofer actual es la asignación con `ended_at IS NULL`. Un índice único parcial impide dos turnos abiertos en la misma unidad.

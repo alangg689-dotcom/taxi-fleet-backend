@@ -210,6 +210,19 @@ async def driver_socket(
     await websocket.accept()
     logger.info("Chofer conectado; unidad %s", vehicle.plate)
 
+    # La app no tiene otra forma de enterarse de su propio vehicle_id/status
+    # (device_key no es un JWT, no trae claims) — se lo manda una vez al
+    # conectar para que pueda usar POST /vehicles/{id}/status (corte de calle).
+    await websocket.send_text(
+        json.dumps(
+            {
+                "type": "connected",
+                "vehicle_id": str(vehicle.id),
+                "vehicle_status": vehicle.status.value,
+            }
+        )
+    )
+
     offers_task: asyncio.Task | None = None
     if current_driver_id is not None:
         offers_task = asyncio.create_task(_forward_trip_offers(websocket, current_driver_id))
