@@ -199,3 +199,43 @@ async def test_vehicle_status_rejects_offline_and_mantenimiento(client, db_sessi
         headers=auth_headers(operator_token),
     )
     assert response.status_code == 422
+
+
+async def test_operator_can_regenerate_device_key(client, db_session):
+    """La unidad ya existe, con su device_key original — regenerarla no debe
+    romper nada más que invalidar la vieja."""
+    vehicle, old_key = await make_vehicle(db_session, with_device_key=True)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/device-key",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(vehicle.id)
+    assert "device_key" in body
+    assert body["device_key"] != old_key
+
+
+async def test_driver_cannot_regenerate_device_key(client, db_session):
+    """Re-emparejar un teléfono con una unidad es decisión de operador/admin,
+    no algo que el chofer pueda hacer por su cuenta."""
+    vehicle = await make_vehicle(db_session)
+    _, driver_token = await make_driver(db_session)
+
+    response = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/device-key",
+        headers=auth_headers(driver_token),
+    )
+    assert response.status_code == 403
+
+
+async def test_regenerate_device_key_unknown_vehicle_is_404(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        "/api/v1/vehicles/00000000-0000-0000-0000-000000000000/device-key",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 404

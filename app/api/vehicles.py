@@ -111,6 +111,33 @@ async def update_vehicle(
     return vehicle
 
 
+@router.post("/{vehicle_id}/device-key", response_model=VehicleCreated)
+async def regenerate_device_key(
+    vehicle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Genera una clave de dispositivo nueva para una unidad que ya existe —
+    la anterior deja de servir de inmediato. Pensado para cuando cambia el
+    teléfono montado en la unidad; a diferencia de POST /vehicles/{id}/status,
+    esto es solo para operador/admin, el chofer no puede hacerlo por su cuenta."""
+    vehicle = await db.get(Vehicle, vehicle_id)
+    if vehicle is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
+
+    device_key = generate_token()
+    vehicle.device_key_hash = hash_token(device_key)
+
+    return VehicleCreated(
+        id=vehicle.id,
+        plate=vehicle.plate,
+        model=vehicle.model,
+        year=vehicle.year,
+        status=vehicle.status,
+        device_key=device_key,
+    )
+
+
 @router.post("/{vehicle_id}/status", response_model=VehicleOut)
 async def set_vehicle_status(
     vehicle_id: uuid.UUID,

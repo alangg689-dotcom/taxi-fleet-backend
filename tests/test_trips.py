@@ -353,3 +353,105 @@ async def test_list_trips_paginates_with_total_count_header(client, db_session):
     first_ids = {t["id"] for t in first_page.json()}
     second_ids = {t["id"] for t in second_page.json()}
     assert first_ids.isdisjoint(second_ids)
+
+
+async def test_street_hail_creates_trip_already_en_curso(client, db_session):
+    """Corte de calle: nace en 'en_curso' directo, sin pasar por
+    solicitado/asignado — no hay a quién ofrecérselo."""
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
+    driver, driver_token = await make_driver(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/assignments",
+        json={"driver_id": str(driver.id)},
+        headers=auth_headers(operator_token),
+    )
+
+    response = await client.post(
+        "/api/v1/trips/street-hail",
+        json={"origin_lat": 27.9462399, "origin_lng": -110.928229, "origin_address": "Calle"},
+        headers=auth_headers(driver_token),
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "en_curso"
+    assert body["driver_id"] == str(driver.id)
+    assert body["vehicle_id"] == str(vehicle.id)
+    assert body["started_at"] is not None
+
+
+async def test_street_hail_marks_vehicle_ocupado_and_complete_frees_it(client, db_session):
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
+    driver, driver_token = await make_driver(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/assignments",
+        json={"driver_id": str(driver.id)},
+        headers=auth_headers(operator_token),
+    )
+    driver_headers = auth_headers(driver_token)
+
+    started = await client.post(
+        "/api/v1/trips/street-hail",
+        json={"origin_lat": 27.9462399, "origin_lng": -110.928229},
+        headers=driver_headers,
+    )
+    trip_id = started.json()["id"]
+
+    await db_session.refresh(vehicle)
+    assert vehicle.status == VehicleStatus.OCUPADO
+
+    completed = await client.post(
+        f"/api/v1/trips/{trip_id}/complete",
+        json={"fare": 60},
+        headers=driver_headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["fare"] == 60
+
+    await db_session.refresh(vehicle)
+    assert vehicle.status == VehicleStatus.DISPONIBLE
+
+
+async def test_street_hail_without_open_shift_is_404(client, db_session):
+    _, driver_token = await make_driver(db_session)
+
+    response = await client.post(
+        "/api/v1/trips/street-hail",
+        json={"origin_lat": 27.9462399, "origin_lng": -110.928229},
+        headers=auth_headers(driver_token),
+    )
+    assert response.status_code == 404
+
+
+async def test_street_hail_rejects_vehicle_not_disponible(client, db_session):
+    """Ya está ocupado (otro corte, o un viaje despachado en curso) — no se
+    puede iniciar un segundo corte encima."""
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.OCUPADO)
+    driver, driver_token = await make_driver(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/assignments",
+        json={"driver_id": str(driver.id)},
+        headers=auth_headers(operator_token),
+    )
+
+    response = await client.post(
+        "/api/v1/trips/street-hail",
+        json={"origin_lat": 27.9462399, "origin_lng": -110.928229},
+        headers=auth_headers(driver_token),
+    )
+    assert response.status_code == 409
+
+
+async def test_staff_cannot_start_street_hail(client, db_session):
+    """Es una acción del chofer sobre sí mismo; un operador no tiene 'su'
+    turno para iniciar un corte."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        "/api/v1/trips/street-hail",
+        json={"origin_lat": 27.9462399, "origin_lng": -110.928229},
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 403

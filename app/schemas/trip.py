@@ -48,6 +48,17 @@ class TripDispatchCreate(BaseModel):
         return self
 
 
+class TripStreetHailCreate(BaseModel):
+    """Corte de calle: el propio chofer toma un pasaje sin operador ni motor
+    de despacho de por medio. A diferencia de TripDispatchCreate, el origen
+    es solo informativo (no dispara una búsqueda de candidatos) — el viaje
+    nace ya asignado a quien lo está creando."""
+
+    origin_lat: float = Field(..., ge=-90, le=90)
+    origin_lng: float = Field(..., ge=-180, le=180)
+    origin_address: str | None = Field(None, max_length=255)
+
+
 class TripComplete(BaseModel):
     """Lo que cobró el chofer — a mano, no hay cálculo automático de tarifa.
     Opcional: no todos los operadores van a querer llevar este registro."""
