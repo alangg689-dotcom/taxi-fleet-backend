@@ -25,8 +25,14 @@ from app.api.location import _point
 from app.core.deps import require_roles
 from app.core.dispatch import dispatch_trip
 from app.database import get_db
-from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleStatus
-from app.schemas.trip import TripComplete, TripCreate, TripDispatchCreate, TripOut
+from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleAssignment, VehicleStatus
+from app.schemas.trip import (
+    TripComplete,
+    TripCreate,
+    TripDispatchCreate,
+    TripOut,
+    TripStreetHailCreate,
+)
 
 router = APIRouter(prefix="/trips", tags=["viajes"])
 
@@ -185,6 +191,47 @@ async def dispatch_new_trip(
 
     asyncio.create_task(dispatch_trip(trip_id))
     return await _get_trip_out(db, trip_id)
+
+
+@router.post("/street-hail", response_model=TripOut, status_code=status.HTTP_201_CREATED)
+async def start_street_hail(
+    payload: TripStreetHailCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_or_staff),
+):
+    """Corte de calle: el chofer toma un pasaje directo sin operador ni motor
+    de despacho de por medio. Nace ya 'en_curso' — no hay a quién ofrecérselo,
+    el chofer ya tiene al pasajero enfrente. Se cierra con el mismo
+    `POST /trips/{id}/complete` de cualquier otro viaje (importe opcional),
+    así sí cuenta en el resumen de ingresos del chofer."""
+    driver = await _get_own_driver_or_403(db, user)
+
+    assignment = await db.execute(
+        select(VehicleAssignment).where(
+            VehicleAssignment.driver_id == driver.id,
+            VehicleAssignment.ended_at.is_(None),
+        )
+    )
+    current = assignment.scalar_one_or_none()
+    if current is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No tienes un turno abierto")
+
+    vehicle = await db.get(Vehicle, current.vehicle_id)
+    if vehicle is None or vehicle.status != VehicleStatus.DISPONIBLE:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Tu unidad no está disponible ahorita")
+
+    trip = Trip(
+        driver_id=driver.id,
+        vehicle_id=vehicle.id,
+        origin=_point(payload.origin_lat, payload.origin_lng),
+        origin_address=payload.origin_address,
+        status=TripStatus.EN_CURSO,
+        started_at=datetime.now(UTC),
+    )
+    db.add(trip)
+    await db.flush()
+    await _set_vehicle_status(db, vehicle.id, VehicleStatus.OCUPADO)
+    return await _get_trip_out(db, trip.id)
 
 
 @router.get("", response_model=list[TripOut])
