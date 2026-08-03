@@ -20,6 +20,11 @@ segundo canal de eventos solo para esto. Pub/Sub sí hace falta para *empujar*
 la oferta al WebSocket del chofer, porque ese socket puede estar conectado a
 otra instancia del backend (mismo motivo que el resto del pub/sub del
 proyecto).
+
+Cada oferta también se manda como notificación push (app.core.push) si el
+chofer tiene un token registrado — el Pub/Sub de arriba solo le llega a un
+socket vivo; si trae la app en segundo plano o cerrada, el push es la única
+forma en que se entera.
 """
 
 import asyncio
@@ -34,9 +39,10 @@ from sqlalchemy import bindparam, cast, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.push import send_push_notification
 from app.core.redis_client import publish_trip_offer
 from app.database import SessionLocal
-from app.models import Trip, TripStatus
+from app.models import Driver, Trip, TripStatus
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +164,17 @@ async def dispatch_trip(trip_id: uuid.UUID) -> None:
             )
             await db.commit()
 
+            driver = await db.get(Driver, candidate.driver_id)
+            push_token = driver.push_token if driver is not None else None
+
         await publish_trip_offer(str(candidate.driver_id), payload_base)
+        if push_token:
+            await send_push_notification(
+                push_token,
+                title="Nuevo viaje",
+                body=payload_base["origin_address"] or "Viaje cerca de ti",
+                data={"type": "trip_offer", "trip_id": payload_base["trip_id"]},
+            )
         logger.info(
             "Viaje %s: ofrecido a chofer %s (unidad %s, %.0fm)",
             trip_id, candidate.driver_id, candidate.vehicle_id, candidate.distance_m,

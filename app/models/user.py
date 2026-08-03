@@ -53,6 +53,11 @@ class Driver(Base):
         Enum(DriverStatus, name="driver_status", values_callable=lambda e: [m.value for m in e]),
         default=DriverStatus.ACTIVO,
     )
+    # Token de push de Expo del teléfono del chofer — la red de seguridad
+    # para cuando /ws/driver no tiene un socket vivo (app en segundo plano o
+    # cerrada). Se sobreescribe en cada registro; no hace falta soportar
+    # varios dispositivos por chofer en una flotilla de este tamaño.
+    push_token: Mapped[str | None] = mapped_column(String(255))
 
     user: Mapped["User"] = relationship(back_populates="driver")
     assignments: Mapped[list["VehicleAssignment"]] = relationship(
