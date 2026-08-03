@@ -80,7 +80,7 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 **Vehículos** — `GET|POST /vehicles` (paginado, ver abajo) · `GET|PATCH /vehicles/{id}` (solo staff, cualquier campo) · `POST /vehicles/{id}/status` (el propio chofer puede marcar su unidad disponible/ocupado — ver abajo) · `POST /vehicles/{id}/device-key` (regenera la clave de dispositivo; solo staff — re-emparejar un teléfono con una unidad es decisión de operador/admin, no del chofer) · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close`
 
-**Choferes** — `GET|POST /drivers` (alta solo admin; listado paginado) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin)
+**Choferes** — `GET|POST /drivers` (alta solo admin; listado paginado) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin) · `POST /drivers/me/push-token` (el chofer registra el token de push de su teléfono — ver "Notificaciones push" abajo)
 
 **Telemetría** — `POST /location/ping` · `GET /vehicles/locations` (snapshot de flota) · `GET /vehicles/{id}/location` · `GET /vehicles/nearby?lat=&lng=&radius=` · `GET /vehicles/{id}/history?since=&until=` (paginado, default 500/tope 2000 — ver nota abajo) · `GET /vehicles/{id}/history/summary?since=&until=` (posición promedio cada 5 min, para rangos largos)
 
@@ -173,6 +173,12 @@ La espera de respuesta (`_wait_for_response`) no usa Pub/Sub: es más simple rel
 El WebSocket `/ws/driver` ahora es bidireccional: además de recibir pings del chofer, se suscribe (mientras dura la conexión) al canal de ofertas del chofer que tenga el turno abierto de esa unidad, y le reenvía cualquier `trip_offer` que le llegue.
 
 Al aceptar la conexión manda, antes que nada, un mensaje `{"type": "connected", "vehicle_id": ..., "vehicle_status": ..., "vehicle_plate": ...}`: es la única forma que tiene la app de enterarse de su propio `vehicle_id` (el `device_key` no es un JWT, no trae claims), y lo necesita para llamar `POST /vehicles/{id}/status` (corte de calle). `vehicle_plate` es solo para mostrarle al chofer qué unidad es.
+
+## Notificaciones push
+
+El Pub/Sub de arriba solo le llega a un WebSocket `/ws/driver` que esté vivo en ese momento — si el chofer trae la app en segundo plano o cerrada del todo, esa oferta nunca la ve. `app.core.push` es la red de seguridad: cada oferta que manda `dispatch_trip` también se manda como notificación push (si el chofer tiene un token registrado vía `POST /drivers/me/push-token`), independiente de si el WebSocket está conectado.
+
+Se usa el servicio de push de Expo (`https://exp.host/--/api/v2/push/send`) en vez de hablar con FCM/APNs directamente: un solo POST HTTP, sin SDKs nativos ni credenciales por plataforma de nuestro lado — Expo hace de intermediario con Google/Apple usando las credenciales que la app ya tiene configuradas en EAS. `send_push_notification` nunca lanza: un push es un complemento del WebSocket, no el camino principal del despacho, así que Expo caído o un token vencido no debe tumbar el resto de `dispatch_trip`.
 
 ## Notas sobre el modelo de datos
 

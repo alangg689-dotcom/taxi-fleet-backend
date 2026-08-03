@@ -200,3 +200,30 @@ async def test_deactivated_driver_otp_request_yields_no_code(
     )
     assert response.status_code == 200
     assert sent_codes == []
+
+
+async def test_driver_can_register_push_token(client, db_session):
+    driver, driver_token = await make_driver(db_session)
+
+    response = await client.post(
+        "/api/v1/drivers/me/push-token",
+        json={"push_token": "ExponentPushToken[abc123]"},
+        headers=auth_headers(driver_token),
+    )
+    assert response.status_code == 204
+
+    await db_session.refresh(driver)
+    assert driver.push_token == "ExponentPushToken[abc123]"
+
+
+async def test_staff_cannot_register_push_token(client, db_session):
+    """Es una acción del chofer sobre su propio perfil; un operador no tiene
+    un perfil de chofer al que registrarle un token."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        "/api/v1/drivers/me/push-token",
+        json={"push_token": "ExponentPushToken[abc123]"},
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 403

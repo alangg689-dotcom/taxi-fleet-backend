@@ -18,6 +18,13 @@ class DriverUpdate(BaseModel):
     status: DriverStatus | None = None
 
 
+class PushTokenUpdate(BaseModel):
+    """Token de push de Expo del teléfono del chofer — se sobreescribe en
+    cada registro, así que el que quede es siempre el del dispositivo activo."""
+
+    push_token: str = Field(..., min_length=1, max_length=255)
+
+
 class DriverOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

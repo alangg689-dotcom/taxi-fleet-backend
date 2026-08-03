@@ -14,12 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import require_roles
 from app.database import get_db
 from app.models import Driver, User, UserRole
-from app.schemas.driver import DriverCreate, DriverOut, DriverUpdate
+from app.schemas.driver import DriverCreate, DriverOut, DriverUpdate, PushTokenUpdate
 
 router = APIRouter(prefix="/drivers", tags=["choferes"])
 
 staff_only = require_roles(UserRole.OPERATOR, UserRole.ADMIN)
 admin_only = require_roles(UserRole.ADMIN)
+driver_only = require_roles(UserRole.DRIVER)
 
 
 def _driver_query():
@@ -75,6 +76,24 @@ async def create_driver(
 
     result = await db.execute(_driver_query().where(Driver.id == driver.id))
     return DriverOut(**result.mappings().one())
+
+
+@router.post("/me/push-token", status_code=status.HTTP_204_NO_CONTENT)
+async def register_push_token(
+    payload: PushTokenUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_only),
+):
+    """El chofer registra el token de push de Expo de su teléfono en cuanto
+    la app tiene permiso y uno vigente — es la red de seguridad que usa
+    app.core.dispatch para avisarle una oferta de viaje aunque /ws/driver no
+    tenga un socket vivo en ese momento (app en segundo plano o cerrada)."""
+    result = await db.execute(select(Driver).where(Driver.user_id == user.id))
+    driver = result.scalar_one_or_none()
+    if driver is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chofer no encontrado")
+    driver.push_token = payload.push_token
+    await db.commit()
 
 
 @router.get("", response_model=list[DriverOut])
