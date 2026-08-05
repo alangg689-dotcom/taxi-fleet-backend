@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.location import _point
 from app.core.deps import require_roles
 from app.core.dispatch import dispatch_trip
+from app.core.whatsapp import send_whatsapp_message
 from app.database import get_db
 from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleAssignment, VehicleStatus
 from app.schemas.trip import (
@@ -75,12 +76,16 @@ async def _get_trip_out(db: AsyncSession, trip_id: uuid.UUID) -> TripOut:
 
 
 async def _authorize_trip(trip: Trip, user: User, db: AsyncSession) -> None:
-    """Un chofer solo puede tocar sus propios viajes; staff puede con todos."""
+    """Un chofer solo puede tocar sus propios viajes o uno que el motor de
+    despacho le esté ofreciendo todavía (driver_id sigue vacío hasta que lo
+    acepta); staff puede con todos."""
     if user.role != UserRole.DRIVER:
         return
     result = await db.execute(select(Driver).where(Driver.user_id == user.id))
     driver = result.scalar_one_or_none()
-    if driver is None or trip.driver_id != driver.id:
+    is_own_trip = driver is not None and trip.driver_id == driver.id
+    is_offered_to_driver = driver is not None and trip.offered_driver_id == driver.id
+    if not is_own_trip and not is_offered_to_driver:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes acceso a este viaje")
 
 
@@ -279,7 +284,12 @@ async def list_trips(
     query = (
         select(*_trip_columns())
         .where(*conditions)
-        .order_by(Trip.requested_at.desc())
+        # `requested_at` solo (server_default=func.now()) no basta como orden
+        # de paginación: dentro de una misma transacción, now() en Postgres
+        # devuelve el mismo valor para todos los INSERT — cualquier viaje
+        # creado junto (o en pruebas, dentro del mismo SAVEPOINT) empata, y
+        # sin desempate la paginación entre páginas deja de ser estable.
+        .order_by(Trip.requested_at.desc(), Trip.id.desc())
         .limit(limit)
         .offset(offset)
     )
@@ -333,6 +343,15 @@ async def accept_trip(
     trip.offered_vehicle_id = None
     trip.offer_expires_at = None
     await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
+
+    if trip.customer_phone:
+        vehicle = await db.get(Vehicle, trip.vehicle_id)
+        plate = vehicle.plate if vehicle is not None else "sin placa"
+        await send_whatsapp_message(
+            trip.customer_phone,
+            f"¡Un taxi va en camino! Unidad {plate}. Te avisamos cuando llegue.",
+        )
+
     return await _get_trip_out(db, trip_id)
 
 

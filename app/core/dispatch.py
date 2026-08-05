@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.push import send_push_notification
 from app.core.redis_client import publish_trip_offer
+from app.core.whatsapp import send_whatsapp_message
 from app.database import SessionLocal
 from app.models import Driver, Trip, TripStatus
 
@@ -149,6 +150,11 @@ async def dispatch_trip(trip_id: uuid.UUID) -> None:
 
     if not candidates:
         logger.info("Viaje %s: sin unidades candidatas cerca del origen", trip_id)
+        if trip.customer_phone:
+            await send_whatsapp_message(
+                trip.customer_phone,
+                "Por ahora no hay taxis disponibles cerca de ti. Intenta de nuevo en unos minutos.",
+            )
         return
 
     for candidate in candidates:
@@ -190,5 +196,11 @@ async def dispatch_trip(trip_id: uuid.UUID) -> None:
             trip.offered_driver_id = None
             trip.offered_vehicle_id = None
             trip.offer_expires_at = None
+            customer_phone = trip.customer_phone
             await db.commit()
+            if customer_phone:
+                await send_whatsapp_message(
+                    customer_phone,
+                    "No encontramos un taxi disponible por ahora. Intenta de nuevo en unos minutos.",
+                )
     logger.info("Viaje %s: ningún candidato aceptó", trip_id)

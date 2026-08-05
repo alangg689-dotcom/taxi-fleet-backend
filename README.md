@@ -88,6 +88,8 @@ El SMS se manda con `SMS_PROVIDER=twilio` (REST directo por `httpx`, sin el SDK 
 
 Los listados (`/vehicles`, `/drivers`, `/trips`) aceptan `limit` (default 50, máximo 200) y `offset`. `GET /vehicles/{id}/history` usa un default y un tope más altos (500/2000): con ~10-20 pings/segundo de toda la flota, un solo día de una unidad ya son varios miles de filas, y el tope de 200 de los demás listados lo haría inservible para su uso normal (dibujar una ruta completa). El total que coincide con los filtros —antes de aplicar `limit`/`offset`— va en el header de respuesta `X-Total-Count`, no en el cuerpo: así el JSON se queda como una lista plana y no rompe a nadie que ya lo consuma sin paginar. Ese header está expuesto por CORS (`Access-Control-Expose-Headers`) para que un dashboard en el navegador pueda leerlo con `fetch()`.
 
+**WhatsApp** — `POST /whatsapp/webhook` (webhook de Twilio; sin auth de la app — ver "Bot de WhatsApp" abajo)
+
 **Tiempo real** — `WS /ws/driver?device_key=...` · `WS /ws/fleet?token=...`
 
 > El router de telemetría se registra **antes** que el de vehículos en `main.py`. FastAPI resuelve rutas en orden, y si fuera al revés, `/vehicles/{vehicle_id}` capturaría `/vehicles/nearby` e intentaría leer "nearby" como UUID.
@@ -161,7 +163,7 @@ ofrece al más cercano ──PUBLISH──> Redis ──> WS /ws/driver del chof
         │
         │  chofer acepta ──POST /trips/{id}/accept──> ASIGNADO, fin
         │  chofer rechaza ─POST /trips/{id}/reject──> siguiente candidato
-        │  no contesta en DISPATCH_OFFER_TIMEOUT_SECONDS (default 20s) ─> siguiente candidato
+        │  no contesta en DISPATCH_OFFER_TIMEOUT_SECONDS (default 25s) ─> siguiente candidato
         ▼
    se acaban los candidatos → la oferta queda vacía, el viaje sigue "solicitado"
 ```
@@ -179,6 +181,29 @@ Al aceptar la conexión manda, antes que nada, un mensaje `{"type": "connected",
 El Pub/Sub de arriba solo le llega a un WebSocket `/ws/driver` que esté vivo en ese momento — si el chofer trae la app en segundo plano o cerrada del todo, esa oferta nunca la ve. `app.core.push` es la red de seguridad: cada oferta que manda `dispatch_trip` también se manda como notificación push (si el chofer tiene un token registrado vía `POST /drivers/me/push-token`), independiente de si el WebSocket está conectado.
 
 Se usa el servicio de push de Expo (`https://exp.host/--/api/v2/push/send`) en vez de hablar con FCM/APNs directamente: un solo POST HTTP, sin SDKs nativos ni credenciales por plataforma de nuestro lado — Expo hace de intermediario con Google/Apple usando las credenciales que la app ya tiene configuradas en EAS. `send_push_notification` nunca lanza: un push es un complemento del WebSocket, no el camino principal del despacho, así que Expo caído o un token vencido no debe tumbar el resto de `dispatch_trip`.
+
+## Bot de WhatsApp
+
+`POST /whatsapp/webhook` recibe los mensajes entrantes de Twilio y llama directo a `dispatch_trip()` — el mismo motor de despacho que ya usan el dashboard y `POST /trips/dispatch`, tal como se dejó anotado desde que se armó ese endpoint. No hay árbol de menús: cualquier mensaje de texto contesta pidiendo ubicación (`app.core.whatsapp_bot._GREETING`); en cuanto Twilio manda una con `Latitude`/`Longitude` (el cliente comparte su ubicación de WhatsApp), se crea el viaje y se despacha.
+
+```
+cliente escribe / comparte ubicación
+        │
+        ▼
+POST /whatsapp/webhook  ──Form (From, Latitude, Longitude)──> handle_incoming_message
+        │
+        ├─ sin ubicación ─────────────> responde pidiendo compartir ubicación (TwiML)
+        ├─ ya tiene un viaje en curso ─> responde que espere (TwiML)
+        └─ con ubicación ──────────────> crea Trip(customer_phone=From) + dispatch_trip() en background
+                                          responde "buscando taxi…" (TwiML, inmediato)
+                                                  │
+                                     chofer acepta ──> WhatsApp al cliente: "unidad X va en camino"
+                                     nadie acepta / sin candidatos ──> WhatsApp al cliente avisando
+```
+
+El estado de la conversación (`wa:conv:{phone}` → id del viaje activo) vive en Redis con una hora de TTL — es solo para saber si ya hay un viaje en curso para ese número, no un historial de chat. Un viaje se considera "ya no bloquea una solicitud nueva" si está completado/cancelado, o si quedó en "solicitado" más tiempo del que el motor de despacho tarda en agotar todos sus candidatos (`DISPATCH_OFFER_TIMEOUT_SECONDS × DISPATCH_MAX_CANDIDATES`) — cubre el caso de que nadie haya aceptado sin que el viaje se cancele explícitamente.
+
+Por ahora corre contra el **sandbox compartido de Twilio** (`TWILIO_WHATSAPP_FROM`, el número público `whatsapp:+14155238886`) — solo le contesta a números que se hayan unido al sandbox mandando el código que da Twilio. Pasar a un número de WhatsApp Business propio requiere aprobación de Meta y reemplazar ese número; también queda pendiente validar la firma `X-Twilio-Signature` del webhook (mientras se prueba en el sandbox compartido no hay nada sensible que proteger todavía).
 
 ## Notas sobre el modelo de datos
 
