@@ -53,8 +53,14 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
 
+    # --- Bot de WhatsApp (Twilio) ---
+    # Número compartido del sandbox de Twilio por default — el mismo para
+    # cualquier cuenta mientras se prueba. Al pasar a un perfil de WhatsApp
+    # Business propio, se reemplaza por el número real aprobado por Meta.
+    TWILIO_WHATSAPP_FROM: str = "whatsapp:+14155238886"
+
     # --- Motor de despacho automático ---
-    DISPATCH_OFFER_TIMEOUT_SECONDS: int = 20   # tiempo para aceptar/rechazar antes de pasar al siguiente
+    DISPATCH_OFFER_TIMEOUT_SECONDS: int = 25   # tiempo para aceptar/rechazar antes de pasar al siguiente
     DISPATCH_SEARCH_RADIUS_METERS: int = 5000  # radio de búsqueda de unidades candidatas
     DISPATCH_MAX_CANDIDATES: int = 10          # tope de candidatos a recorrer por viaje
     DISPATCH_POSITION_FRESHNESS_SECONDS: int = 300  # un ping más viejo que esto no cuenta como "en línea"

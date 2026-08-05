@@ -48,6 +48,11 @@ class Trip(Base):
     origin_address: Mapped[str | None] = mapped_column(String(255))
     destination_address: Mapped[str | None] = mapped_column(String(255))
 
+    # Solo se llena en viajes que nacieron del bot de WhatsApp — es a dónde
+    # se le contesta con el estado del viaje (chofer asignado, etc). Un viaje
+    # de operador/dashboard no tiene cliente identificado, así que queda nulo.
+    customer_phone: Mapped[str | None] = mapped_column(String(32))
+
     status: Mapped[TripStatus] = mapped_column(
         Enum(TripStatus, name="trip_status", values_callable=lambda e: [m.value for m in e]),
         default=TripStatus.SOLICITADO,

@@ -99,6 +99,38 @@ async def test_driver_cannot_see_another_drivers_trip(client, db_session):
     assert response.status_code == 403
 
 
+async def test_driver_can_see_trip_only_offered_to_them(client, db_session):
+    """Al tocar la notificación push de una oferta, la app consulta el viaje
+    por su id antes de que el chofer lo acepte — todavía no es "su" viaje
+    (driver_id sigue vacío), solo se le está ofreciendo."""
+    from app.api.location import _point
+    from app.models import Trip, TripStatus
+
+    vehicle = await make_vehicle(db_session)
+    driver, driver_token = await make_driver(db_session)
+    _, other_driver_token = await make_driver(db_session)
+
+    trip = Trip(
+        origin=_point(19.4326, -99.1332),
+        status=TripStatus.SOLICITADO,
+        offered_driver_id=driver.id,
+        offered_vehicle_id=vehicle.id,
+    )
+    db_session.add(trip)
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/v1/trips/{trip.id}", headers=auth_headers(driver_token)
+    )
+    assert response.status_code == 200
+    assert response.json()["offered_driver_id"] == str(driver.id)
+
+    other_response = await client.get(
+        f"/api/v1/trips/{trip.id}", headers=auth_headers(other_driver_token)
+    )
+    assert other_response.status_code == 403
+
+
 async def test_full_lifecycle_accept_start_complete(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     vehicle = await make_vehicle(db_session)
