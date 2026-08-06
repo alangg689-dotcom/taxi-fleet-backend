@@ -23,11 +23,12 @@ class VehicleUpdate(BaseModel):
 
 class VehicleStatusUpdate(BaseModel):
     """A diferencia de VehicleUpdate (solo staff), esto lo puede mandar el
-    propio chofer — por eso solo acepta disponible/ocupado: para el corte de
-    calle sin pasar por operador ni bot. offline/mantenimiento siguen siendo
-    decisión de un operador."""
+    propio chofer — disponible/ocupado para el corte de calle, y offline
+    para el switch de "entrar/salir a trabajar" de la app (conectarse ya no
+    lo pone disponible solo, ver app.ws.fleet.driver_socket). Mantenimiento
+    sigue siendo decisión de un operador."""
 
-    status: Literal[VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO]
+    status: Literal[VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO, VehicleStatus.OFFLINE]
 
 
 class VehicleOut(BaseModel):
