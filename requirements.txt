@@ -1,6 +1,6 @@
 fastapi==0.140.7
 uvicorn[standard]==0.34.0
-pydantic[email]==2.10.4
+pydantic[email]==2.13.4
 pydantic-settings==2.7.0
 
 # Base de datos
