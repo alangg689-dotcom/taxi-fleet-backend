@@ -17,7 +17,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from app.api.location import _point
-from app.config import settings
 from app.core.dispatch import dispatch_trip
 from app.core.redis_client import redis_client
 from app.database import SessionLocal
@@ -27,11 +26,14 @@ from app.models import Trip, TripStatus
 # a escribir después de eso, empieza de cero como si fuera la primera vez.
 _CONVERSATION_TTL_SECONDS = 3600
 
-# Cuánto puede tardar el motor de despacho en agotar TODOS sus candidatos
-# antes de rendirse (ver app.core.dispatch.dispatch_trip) — mientras tanto,
-# un viaje "solicitado" sigue contando como en curso aunque ya no tenga una
-# oferta activa en este preciso instante (está entre un candidato y otro).
-_DISPATCH_GRACE_SECONDS = settings.DISPATCH_OFFER_TIMEOUT_SECONDS * settings.DISPATCH_MAX_CANDIDATES + 30
+# Red de seguridad, no el camino normal: dispatch_trip cancela un viaje del
+# bot en cuanto se rinde (ver app.core.dispatch), así que en el día a día
+# nunca debería quedar uno "solicitado" tanto tiempo. Pero si el proceso del
+# backend se cae a media tarea (pasó varias veces en desarrollo), ese viaje
+# se queda huérfano para siempre sin este límite — y con él, un cliente
+# bloqueado sin poder volver a pedir taxi hasta que alguien lo arregle a
+# mano en la base de datos.
+_ORPHAN_TRIP_MAX_AGE_SECONDS = _CONVERSATION_TTL_SECONDS
 
 _GREETING = (
     "¡Hola! Soy el asistente de Los Tigres. Para pedir un taxi, comparte tu "
@@ -59,12 +61,18 @@ async def _clear_active_trip(phone: str) -> None:
 
 
 async def _trip_still_active(trip: Trip | None) -> bool:
+    """"solicitado" para un viaje del bot normalmente significa que
+    dispatch_trip lo sigue recorriendo de verdad: en cuanto se agotan los
+    candidatos (o no hay ninguno) sin que nadie acepte, dispatch_trip lo pasa
+    a "cancelado" (ver app.core.dispatch). El tope de edad de abajo es solo
+    la red de seguridad para cuando eso no llegó a pasar (el backend se cayó
+    a media tarea), no la regla principal."""
     if trip is None:
         return False
     if trip.status in (TripStatus.ASIGNADO, TripStatus.EN_CURSO):
         return True
     if trip.status == TripStatus.SOLICITADO:
-        cutoff = datetime.now(UTC) - timedelta(seconds=_DISPATCH_GRACE_SECONDS)
+        cutoff = datetime.now(UTC) - timedelta(seconds=_ORPHAN_TRIP_MAX_AGE_SECONDS)
         return trip.requested_at > cutoff
     return False
 
