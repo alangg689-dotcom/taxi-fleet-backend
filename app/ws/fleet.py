@@ -77,19 +77,19 @@ class DashboardManager:
 manager = DashboardManager()
 
 
-async def _forward_trip_offers(websocket: WebSocket, driver_id: object) -> None:
+async def _forward_trip_offers(websocket: WebSocket, pubsub) -> None:
     """Tarea de fondo por conexión: reenvía al chofer las ofertas de viaje
     que el motor de despacho (app.core.dispatch) le publique mientras esta
     conexión siga abierta.
 
-    Mismo patrón que `redis_listener`, pero suscrito al canal de UN chofer en
-    particular en vez de al canal de flota completo — necesario porque el
-    motor de despacho puede correr en otra instancia del backend.
+    Recibe el `pubsub` ya suscrito (ver driver_socket) en vez de suscribirse
+    aquí mismo: si la suscripción se hiciera dentro de esta tarea de fondo,
+    lanzada con `asyncio.create_task` sin esperar a que termine, quedaría una
+    ventana entre que el chofer "se conecta" (candidato válido para el motor
+    de despacho) y que el canal queda realmente suscrito. Un PUBLISH de
+    Redis que caiga en esa ventana se pierde para siempre — a diferencia de
+    una cola, Pub/Sub no le entrega nada a quien se suscribe tarde.
     """
-    pubsub = redis_client.pubsub()
-    channel = driver_offer_channel(str(driver_id))
-    await pubsub.subscribe(channel)
-
     try:
         async for message in pubsub.listen():
             if message.get("type") != "message":
@@ -101,7 +101,7 @@ async def _forward_trip_offers(websocket: WebSocket, driver_id: object) -> None:
         raise
     finally:
         with contextlib.suppress(Exception):
-            await pubsub.unsubscribe(channel)
+            await pubsub.unsubscribe()
             await pubsub.aclose()
 
 
@@ -207,6 +207,14 @@ async def driver_socket(
     )
     current_driver_id = assignment_result.scalar_one_or_none()
 
+    # Suscrito ANTES de aceptar la conexión (y por lo tanto antes de que este
+    # chofer pueda volverse candidato de un despacho): ver el porqué en el
+    # docstring de _forward_trip_offers.
+    offers_pubsub = None
+    if current_driver_id is not None:
+        offers_pubsub = redis_client.pubsub()
+        await offers_pubsub.subscribe(driver_offer_channel(str(current_driver_id)))
+
     await websocket.accept()
     logger.info("Chofer conectado; unidad %s", vehicle.plate)
 
@@ -227,10 +235,10 @@ async def driver_socket(
     )
 
     offers_task: asyncio.Task | None = None
-    if current_driver_id is not None:
-        offers_task = asyncio.create_task(_forward_trip_offers(websocket, current_driver_id))
-
     try:
+        if offers_pubsub is not None:
+            offers_task = asyncio.create_task(_forward_trip_offers(websocket, offers_pubsub))
+
         while True:
             raw = await websocket.receive_text()
             try:
