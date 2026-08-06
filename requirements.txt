@@ -10,7 +10,7 @@ geoalchemy2==0.16.0
 alembic==1.14.0
 
 # Redis (cache + pub/sub + rate limiting)
-redis==5.2.1
+redis==8.1.0
 
 # Seguridad
 python-jose[cryptography]==3.5.0
