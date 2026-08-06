@@ -20,9 +20,10 @@ import pytest
 from httpx_ws import WebSocketDisconnect, aconnect_ws
 from sqlalchemy import select
 
+from app.core.redis_client import publish_trip_offer
 from app.models import LocationPing, UserRole
 from app.ws import fleet as fleet_module
-from tests.factories import make_driver, make_staff_user, make_vehicle
+from tests.factories import make_driver, make_open_assignment, make_staff_user, make_vehicle
 
 
 def _ping(**overrides) -> dict:
@@ -104,6 +105,29 @@ async def test_driver_socket_sends_connected_with_vehicle_id_and_status(
                 "vehicle_status": "disponible",
                 "vehicle_plate": vehicle.plate,
             }
+
+
+async def test_driver_socket_receives_offer_published_right_after_connecting(
+    ws_client_factory, db_session
+):
+    """Regresión: el canal de ofertas se suscribe ANTES de aceptar la
+    conexión (ver docstring de _forward_trip_offers en app/ws/fleet.py). Con
+    el bug, un PUBLISH que cayera justo después del mensaje "connected" se
+    perdía para siempre — Redis Pub/Sub no le entrega nada a quien se
+    suscribe tarde. Publicar aquí en cuanto llega "connected" reproduce esa
+    ventana exacta."""
+    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+    driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+
+    async with ws_client_factory() as ws_client:
+        async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # "connected"
+
+            await publish_trip_offer(str(driver.id), {"trip_id": "abc123"})
+
+            offer = await asyncio.wait_for(ws.receive_json(), timeout=2)
+            assert offer == {"type": "trip_offer", "data": {"trip_id": "abc123"}}
 
 
 async def test_driver_socket_accepts_valid_device_key_and_persists_ping(
