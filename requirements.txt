@@ -7,7 +7,7 @@ pydantic-settings==2.7.0
 sqlalchemy==2.0.51
 asyncpg==0.31.0
 geoalchemy2==0.16.0
-alembic==1.14.0
+alembic==1.18.5
 
 # Redis (cache + pub/sub + rate limiting)
 redis==5.2.1
