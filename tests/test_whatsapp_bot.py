@@ -66,17 +66,19 @@ async def test_trip_still_active_false_for_none():
     assert await bot._trip_still_active(None) is False
 
 
-async def test_trip_still_active_true_for_recent_solicitado_without_offer():
-    """Sigue "en curso" mientras el motor de despacho recorre candidatos,
-    aunque en este instante puntual no traiga una oferta activa."""
+async def test_trip_still_active_true_for_recent_solicitado():
+    """dispatch_trip cancela un viaje del bot en cuanto se rinde (ver
+    app.core.dispatch) — mientras siga "solicitado" y reciente, se asume
+    que todavía lo está recorriendo de verdad."""
     trip = Trip(status=TripStatus.SOLICITADO, requested_at=datetime.now(UTC))
     assert await bot._trip_still_active(trip) is True
 
 
-async def test_trip_still_active_false_for_stale_solicitado():
-    """El motor de despacho ya agotó todos sus candidatos hace rato sin que
-    nadie aceptara — se considera terminado aunque nadie lo cancelara."""
-    stale = datetime.now(UTC) - timedelta(seconds=bot._DISPATCH_GRACE_SECONDS + 60)
+async def test_trip_still_active_false_for_orphaned_solicitado():
+    """Red de seguridad: si el backend se cae a media tarea, dispatch_trip
+    nunca llega a cancelar el viaje — sin este tope de edad, ese cliente se
+    quedaría bloqueado para siempre sin poder pedir otro taxi."""
+    stale = datetime.now(UTC) - timedelta(seconds=bot._ORPHAN_TRIP_MAX_AGE_SECONDS + 60)
     trip = Trip(status=TripStatus.SOLICITADO, requested_at=stale)
     assert await bot._trip_still_active(trip) is False
 

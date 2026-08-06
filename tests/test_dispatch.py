@@ -19,12 +19,19 @@ Lo que SÍ se prueba aquí, con el session normal de SAVEPOINT:
     este chofer", sin pasar por dispatch_trip).
   - El contrato HTTP de POST /trips/dispatch (con dispatch_trip
     parcheado a un no-op, para no disparar la tarea de fondo real).
+
+Única excepción: el caso "sin candidatos" de dispatch_trip() SÍ se llama de
+verdad (ver test_dispatch_without_candidates_cancels_bot_trip más abajo) —
+es rápido y determinista (no espera ningún timeout), así que vale la pena
+cubrirlo end-to-end pese al costo de manejar el engine real (ver
+`_dispose_engine_pool` ahí mismo).
 """
 
 from datetime import UTC, datetime, timedelta
 
 from app.api.location import _point
-from app.core.dispatch import find_candidate_drivers
+from app.core.dispatch import dispatch_trip, find_candidate_drivers
+from app.database import SessionLocal, engine
 from app.models import Trip, TripStatus, UserRole, VehicleStatus
 from tests.factories import (
     auth_headers,
@@ -295,3 +302,42 @@ async def test_staff_cannot_reject(client, db_session):
         f"/api/v1/trips/{trip.id}/reject", headers=auth_headers(operator_token)
     )
     assert response.status_code == 403
+
+
+async def test_dispatch_without_candidates_cancels_bot_trip(monkeypatch):
+    """Un viaje de operador se queda "solicitado" cuando no hay candidatos
+    (documentado arriba y en el README) para que quede visible en el
+    dashboard y alguien lo redespache a mano. Uno del bot de WhatsApp no
+    tiene a nadie viendo un dashboard — dejarlo "solicitado" para siempre
+    bloquearía que ese cliente pudiera volver a pedir un taxi (ver
+    _trip_still_active en app.core.whatsapp_bot), así que dispatch_trip lo
+    cancela en cuanto se rinde."""
+    import app.core.dispatch as dispatch_module
+
+    sent = []
+
+    async def _fake_send(phone, body):
+        sent.append((phone, body))
+
+    monkeypatch.setattr(dispatch_module, "send_whatsapp_message", _fake_send)
+
+    async with SessionLocal() as db:
+        trip = Trip(
+            origin=_point(19.4326, -99.1332),
+            status=TripStatus.SOLICITADO,
+            customer_phone="+525512340099",
+        )
+        db.add(trip)
+        await db.flush()
+        trip_id = trip.id
+        await db.commit()
+
+    await dispatch_trip(trip_id)
+
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        assert trip.status == TripStatus.CANCELADO
+
+    assert sent == [("+525512340099", "Por ahora no hay taxis disponibles cerca de ti. Intenta de nuevo en unos minutos.")]
+
+    await engine.dispose()
