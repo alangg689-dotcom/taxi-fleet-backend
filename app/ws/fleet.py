@@ -188,12 +188,10 @@ async def driver_socket(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    # Conectarse pone la unidad "disponible" para el motor de despacho, salvo
-    # que el chofer ya la haya marcado "ocupado" a mano (corte de calle) o
-    # esté offline/mantenimiento por decisión de un operador — eso no se pisa.
-    if vehicle.status == VehicleStatus.OFFLINE:
-        vehicle.status = VehicleStatus.DISPONIBLE
-        await db.commit()
+    # Conectarse ya NO pone la unidad "disponible" sola — el chofer decide
+    # cuándo con el switch de "entrar a trabajar" (POST /vehicles/{id}/status)
+    # en su app. Así puede abrir la app a checar el menú/ingresos sin que le
+    # empiecen a caer viajes de inmediato.
 
     # Turno abierto de esta unidad: si hay alguien manejándola ahora mismo,
     # también recibe por este mismo socket las ofertas de viaje que le mande

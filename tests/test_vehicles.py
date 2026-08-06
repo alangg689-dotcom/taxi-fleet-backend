@@ -1,4 +1,4 @@
-from app.models import UserRole
+from app.models import UserRole, VehicleStatus
 from tests.factories import (
     auth_headers,
     make_driver,
@@ -161,6 +161,28 @@ async def test_driver_can_set_own_vehicle_status(client, db_session):
     assert response.json()["status"] == "ocupado"
 
 
+async def test_driver_can_toggle_offline_disponible(client, db_session):
+    """El switch de "entrar/salir a trabajar" de la app: conectarse ya no
+    pone la unidad disponible sola (ver app.ws.fleet), el chofer decide
+    cuándo con este mismo endpoint."""
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.OFFLINE)
+    driver, driver_token = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    headers = auth_headers(driver_token)
+
+    online = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/status", json={"status": "disponible"}, headers=headers
+    )
+    assert online.status_code == 200
+    assert online.json()["status"] == "disponible"
+
+    offline = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/status", json={"status": "offline"}, headers=headers
+    )
+    assert offline.status_code == 200
+    assert offline.json()["status"] == "offline"
+
+
 async def test_driver_cannot_set_status_of_vehicle_without_their_shift(client, db_session):
     vehicle = await make_vehicle(db_session)
     _, driver_token = await make_driver(db_session)
@@ -187,15 +209,30 @@ async def test_staff_can_set_status_of_any_vehicle(client, db_session):
     assert response.json()["status"] == "disponible"
 
 
-async def test_vehicle_status_rejects_offline_and_mantenimiento(client, db_session):
-    """Esos dos son decisión de un operador (PATCH /vehicles/{id}), no algo
-    que el chofer deba poder ponerse a sí mismo."""
-    vehicle = await make_vehicle(db_session)
+async def test_vehicle_status_accepts_offline(client, db_session):
+    """El switch de "entrar/salir a trabajar" de la app del chofer manda
+    "offline" por este mismo endpoint (ver docstring de VehicleStatusUpdate)."""
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
 
     response = await client.post(
         f"/api/v1/vehicles/{vehicle.id}/status",
         json={"status": "offline"},
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "offline"
+
+
+async def test_vehicle_status_rejects_mantenimiento(client, db_session):
+    """Mantenimiento sigue siendo decisión de un operador vía PATCH
+    /vehicles/{id}, no algo que se autoasigne por este endpoint."""
+    vehicle = await make_vehicle(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/status",
+        json={"status": "mantenimiento"},
         headers=auth_headers(operator_token),
     )
     assert response.status_code == 422

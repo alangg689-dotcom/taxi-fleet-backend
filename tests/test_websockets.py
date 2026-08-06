@@ -93,7 +93,10 @@ async def test_driver_socket_sends_connected_with_vehicle_id_and_status(
     ws_client_factory, db_session
 ):
     """La app no tiene otra forma de saber su propio vehicle_id (device_key no
-    es un JWT) — lo necesita para POST /vehicles/{id}/status (corte de calle)."""
+    es un JWT) — lo necesita para POST /vehicles/{id}/status (switch de
+    "entrar a trabajar" / corte de calle). Conectarse ya no cambia el status
+    solo: una unidad nueva (offline por default) sigue offline hasta que el
+    chofer prenda el switch."""
     vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
 
     async with ws_client_factory() as ws_client:
@@ -102,7 +105,7 @@ async def test_driver_socket_sends_connected_with_vehicle_id_and_status(
             assert connected == {
                 "type": "connected",
                 "vehicle_id": str(vehicle.id),
-                "vehicle_status": "disponible",
+                "vehicle_status": "offline",
                 "vehicle_plate": vehicle.plate,
             }
 
