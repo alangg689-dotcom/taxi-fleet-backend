@@ -13,12 +13,17 @@ class VehicleCreate(BaseModel):
     plate: str = Field(..., max_length=15)
     model: str = Field(..., max_length=100)
     year: int | None = Field(None, ge=1990, le=2100)
+    # Son 6 sitios fijos y toda unidad pertenece a uno — ver
+    # spec-sitios-y-fila-v2.md. Requerido a propósito: no existe un "sin
+    # sitio" válido, ni siquiera como default.
+    stand_id: UUID
 
 
 class VehicleUpdate(BaseModel):
     model: str | None = None
     year: int | None = None
     status: VehicleStatus | None = None
+    stand_id: UUID | None = None
 
 
 class VehicleStatusUpdate(BaseModel):
@@ -39,6 +44,7 @@ class VehicleOut(BaseModel):
     model: str
     year: int | None
     status: VehicleStatus
+    stand_id: UUID
 
 
 class VehicleCreated(VehicleOut):

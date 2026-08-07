@@ -36,6 +36,13 @@ class Vehicle(Base):
     # Credencial ligera del dispositivo: el endpoint de telemetría la valida en
     # lugar de un JWT completo, porque se invoca cada 5-10 segundos por unidad.
     device_key_hash: Mapped[str | None] = mapped_column(String(255), index=True)
+    # NOT NULL a propósito: son 6 sitios fijos y toda unidad pertenece a uno
+    # (decisión de negocio, ver spec-sitios-y-fila-v2.md). La unidad es la
+    # que pertenece al sitio, no el chofer — si rota de unidad vía
+    # vehicle_assignments, rota de sitio con ella.
+    stand_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stands.id"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
