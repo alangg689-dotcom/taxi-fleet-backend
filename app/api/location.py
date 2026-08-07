@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_vehicle_by_device_key, require_roles
+from app.core.ping_validation import validate_ping
 from app.core.redis_client import (
     get_all_last_positions,
     get_last_position,
@@ -44,19 +45,39 @@ def _point(lat: float, lng: float) -> str:
 async def _persist_pings(
     db: AsyncSession, vehicle_id: uuid.UUID, pings: list[LocationPingIn]
 ) -> int:
-    """Inserta el lote en una sola sentencia y descarta duplicados."""
-    rows = [
-        {
-            "id": uuid.uuid4(),
-            "vehicle_id": vehicle_id,
-            "location": _point(p.lat, p.lng),
-            "speed": p.speed,
-            "heading": p.heading,
-            "accuracy": p.accuracy,
-            "timestamp": p.timestamp,
-        }
-        for p in pings
-    ]
+    """Inserta el lote en una sola sentencia y descarta duplicados.
+
+    Cada ping se valida (app.core.ping_validation, sección 6 de la spec de
+    sitios) contra el anterior DENTRO del mismo lote, no solo contra el
+    último cacheado en Redis: un buffer offline puede traer varias lecturas
+    seguidas de la misma unidad, y el salto imposible solo tiene sentido
+    comparando cada una contra la que de verdad la precede. Un ping marcado
+    no eligible no se usa como base de comparación para el siguiente — no
+    hay que confiar en un punto ya descartado.
+
+    Esto no afecta el despacho ni el mapa en vivo (siguen leyendo el cache
+    de Redis tal cual, ver _broadcast_latest) — es exclusivo de la fila de
+    sitios, que todavía no existe."""
+    previous = await get_last_position(str(vehicle_id))
+    rows = []
+    for p in pings:
+        validation = await validate_ping(str(vehicle_id), p, previous)
+        rows.append(
+            {
+                "id": uuid.uuid4(),
+                "vehicle_id": vehicle_id,
+                "location": _point(p.lat, p.lng),
+                "speed": p.speed,
+                "heading": p.heading,
+                "accuracy": p.accuracy,
+                "timestamp": p.timestamp,
+                "queue_eligible": validation.queue_eligible,
+                "flag_reason": validation.flag_reason,
+            }
+        )
+        if validation.queue_eligible:
+            previous = {"lat": p.lat, "lng": p.lng, "timestamp": p.timestamp.isoformat()}
+
     stmt = pg_insert(LocationPing).values(rows).on_conflict_do_nothing(
         constraint="uq_ping_vehicle_time"
     )
