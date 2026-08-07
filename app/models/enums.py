@@ -32,3 +32,13 @@ class TripStatus(str, enum.Enum):
     EN_CURSO = "en_curso"
     COMPLETADO = "completado"
     CANCELADO = "cancelado"
+
+
+class StandQueueStatus(str, enum.Enum):
+    """Estado persistido de un lugar en la fila de un sitio — no confundir
+    con los sub-estados de la máquina (fuera/dentro/candidato), que son
+    derivados y no se guardan (ver spec-sitios-y-fila-v2.md, sección 7)."""
+
+    FORMADO = "formado"
+    ASIGNADO = "asignado"
+    SALIO = "salio"

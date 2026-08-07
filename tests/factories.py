@@ -18,6 +18,7 @@ from app.models import (
     LocationPing,
     Operator,
     PermissionLevel,
+    Stand,
     User,
     UserRole,
     Vehicle,
@@ -76,24 +77,60 @@ async def make_driver(
     return driver, token
 
 
+async def make_stand(
+    db: AsyncSession,
+    *,
+    name: str | None = None,
+    center: tuple[float, float] = (19.4326, -99.1332),
+) -> Stand:
+    """Sitio de prueba: un cuadro de ~100 m alrededor de `center` (lat, lng)
+    — suficiente para probar pertenencia geoespacial sin trazar un polígono
+    real. `center` default es el Zócalo, igual que el resto de las pruebas."""
+    lat, lng = center
+    d = 0.0005  # ~55m en esta latitud
+    polygon_wkt = (
+        f"SRID=4326;POLYGON(("
+        f"{lng - d} {lat - d}, {lng + d} {lat - d}, "
+        f"{lng + d} {lat + d}, {lng - d} {lat + d}, "
+        f"{lng - d} {lat - d}))"
+    )
+    stand = Stand(
+        name=name or f"Sitio de prueba {uuid.uuid4().hex[:6]}",
+        polygon=polygon_wkt,
+        center=_point(lat, lng),
+    )
+    db.add(stand)
+    await db.flush()
+    return stand
+
+
 async def make_vehicle(
     db: AsyncSession,
     *,
     plate: str | None = None,
     with_device_key: bool = False,
     status: VehicleStatus = VehicleStatus.OFFLINE,
+    stand_id: uuid.UUID | None = None,
 ) -> Vehicle | tuple[Vehicle, str]:
     """Con with_device_key=True devuelve (vehicle, device_key crudo): igual que
     el alta real, el hash es lo único que queda en la base. `status` default
     offline, igual que el alta real — el motor de despacho solo considera
-    'disponible' (ver test_dispatch.py)."""
+    'disponible' (ver test_dispatch.py).
+
+    `stand_id` es NOT NULL en el modelo real (son 6 sitios fijos, toda
+    unidad pertenece a uno) — si no se pasa uno, esta fábrica crea un sitio
+    de prueba desechable para no obligar a cada prueba existente a que le
+    importe la fila."""
     plate = plate or f"TST-{uuid.uuid4().hex[:6].upper()}"
     device_key = generate_token() if with_device_key else None
+    if stand_id is None:
+        stand_id = (await make_stand(db)).id
     vehicle = Vehicle(
         plate=plate,
         model="Vehículo de prueba",
         status=status,
         device_key_hash=hash_token(device_key) if device_key else None,
+        stand_id=stand_id,
     )
     db.add(vehicle)
     await db.flush()

@@ -11,7 +11,7 @@ from app.core.deps import require_roles
 from app.core.redis_client import publish_vehicle_status_update
 from app.core.security import generate_token, hash_token
 from app.database import get_db
-from app.models import Driver, User, UserRole, Vehicle, VehicleAssignment
+from app.models import Driver, Stand, User, UserRole, Vehicle, VehicleAssignment
 from app.schemas.vehicle import (
     AssignmentCreate,
     AssignmentOut,
@@ -76,11 +76,15 @@ async def create_vehicle(
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Ya existe una unidad con esa placa")
 
+    if await db.get(Stand, payload.stand_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sitio no encontrado")
+
     device_key = generate_token()
     vehicle = Vehicle(
         plate=payload.plate,
         model=payload.model,
         year=payload.year,
+        stand_id=payload.stand_id,
         device_key_hash=hash_token(device_key),
     )
     db.add(vehicle)
@@ -92,6 +96,7 @@ async def create_vehicle(
         model=vehicle.model,
         year=vehicle.year,
         status=vehicle.status,
+        stand_id=vehicle.stand_id,
         device_key=device_key,
     )
 
@@ -107,7 +112,11 @@ async def update_vehicle(
     if vehicle is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if "stand_id" in updates and await db.get(Stand, updates["stand_id"]) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sitio no encontrado")
+
+    for field, value in updates.items():
         setattr(vehicle, field, value)
     return vehicle
 
@@ -135,6 +144,7 @@ async def regenerate_device_key(
         model=vehicle.model,
         year=vehicle.year,
         status=vehicle.status,
+        stand_id=vehicle.stand_id,
         device_key=device_key,
     )
 

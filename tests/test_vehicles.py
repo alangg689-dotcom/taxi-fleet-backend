@@ -4,31 +4,55 @@ from tests.factories import (
     make_driver,
     make_open_assignment,
     make_staff_user,
+    make_stand,
     make_vehicle,
 )
 
 
 async def test_admin_can_create_vehicle(client, db_session):
     _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    stand = await make_stand(db_session)
 
     response = await client.post(
         "/api/v1/vehicles",
-        json={"plate": "ABC-123", "model": "Nissan Versa", "year": 2022},
+        json={
+            "plate": "ABC-123",
+            "model": "Nissan Versa",
+            "year": 2022,
+            "stand_id": str(stand.id),
+        },
         headers=auth_headers(admin_token),
     )
     assert response.status_code == 201
     body = response.json()
     assert body["plate"] == "ABC-123"
+    assert body["stand_id"] == str(stand.id)
     assert "device_key" in body
+
+
+async def test_create_vehicle_unknown_stand_is_404(client, db_session):
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+
+    response = await client.post(
+        "/api/v1/vehicles",
+        json={
+            "plate": "NOSTAND-1",
+            "model": "Nissan Versa",
+            "stand_id": "00000000-0000-0000-0000-000000000000",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 404
 
 
 async def test_operator_cannot_create_vehicle(client, db_session):
     """Alta de unidades es solo para admin; el operador solo opera turnos."""
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    stand = await make_stand(db_session)
 
     response = await client.post(
         "/api/v1/vehicles",
-        json={"plate": "DEF-456", "model": "Toyota Corolla"},
+        json={"plate": "DEF-456", "model": "Toyota Corolla", "stand_id": str(stand.id)},
         headers=auth_headers(operator_token),
     )
     assert response.status_code == 403
@@ -44,10 +68,11 @@ async def test_driver_cannot_list_vehicles(client, db_session):
 async def test_duplicate_plate_is_conflict(client, db_session):
     _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
     await make_vehicle(db_session, plate="GHI-789")
+    stand = await make_stand(db_session)
 
     response = await client.post(
         "/api/v1/vehicles",
-        json={"plate": "GHI-789", "model": "Otro modelo"},
+        json={"plate": "GHI-789", "model": "Otro modelo", "stand_id": str(stand.id)},
         headers=auth_headers(admin_token),
     )
     assert response.status_code == 409
