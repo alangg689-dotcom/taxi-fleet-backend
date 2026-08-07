@@ -8,11 +8,12 @@ Quién cuenta como "candidato" para un viaje:
   2. Esa unidad mandó un ping de GPS reciente (DISPATCH_POSITION_FRESHNESS_SECONDS)
      dentro del radio de búsqueda del origen del viaje.
   3. Esa unidad no tiene ya otro viaje activo (solicitado/asignado/en_curso).
-  4. Vehicle.status == 'disponible' — el chofer no la marcó "ocupado" a mano
-     (ver POST /vehicles/{id}/status, pensado para un corte de calle) ni está
-     offline/en mantenimiento. /ws/driver la pone en "disponible" en cuanto
-     el chofer conecta (si estaba offline), y accept/complete la mueven entre
-     ocupado/disponible automáticamente durante un viaje despachado por la app.
+  4. Vehicle.status == 'disponible' — el propio chofer decide cuándo con el
+     switch de "entrar/salir a trabajar" en su app (POST /vehicles/{id}/status,
+     acepta disponible/ocupado/offline — ver VehicleStatusUpdate). Conectarse
+     a /ws/driver ya NO cambia el status solo; accept/complete sí lo mueven
+     entre ocupado/disponible automáticamente durante un viaje despachado
+     por la app.
 
 El "ofrecer y esperar" no usa Pub/Sub para la respuesta: es más simple leer
 el propio renglón de trips cada DISPATCH_POLL_INTERVAL_SECONDS que armar un
