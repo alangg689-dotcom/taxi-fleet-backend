@@ -14,14 +14,14 @@ un fixture — ver el docstring de `ws_client_factory` en conftest.py.
 
 import asyncio
 import contextlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx_ws import WebSocketDisconnect, aconnect_ws
 from sqlalchemy import select
 
-from app.core.redis_client import publish_trip_offer
-from app.models import LocationPing, UserRole
+from app.core.redis_client import get_last_position, publish_trip_offer
+from app.models import LocationPing, UserRole, VehicleStatus
 from app.ws import fleet as fleet_module
 from tests.factories import make_driver, make_open_assignment, make_staff_user, make_vehicle
 
@@ -195,7 +195,9 @@ async def test_driver_ping_broadcasts_to_fleet_dashboard(ws_client_factory, db_s
     vive mientras el proceso esté arriba; ASGITransport no dispara ese
     lifespan, así que aquí se levanta a mano, igual de efímero que una prueba.
     """
-    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+    vehicle, device_key = await make_vehicle(
+        db_session, with_device_key=True, status=VehicleStatus.DISPONIBLE
+    )
     _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
 
     listener_task = asyncio.create_task(fleet_module.redis_listener())
@@ -217,6 +219,77 @@ async def test_driver_ping_broadcasts_to_fleet_dashboard(ws_client_factory, db_s
                 update = await asyncio.wait_for(fleet_ws.receive_json(), timeout=2)
                 assert update["type"] == "location_update"
                 assert update["data"]["vehicle_id"] == str(vehicle.id)
+                assert update["data"]["status"] == "disponible"
+                assert update["data"]["on_trip"] is False
+    finally:
+        listener_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener_task
+
+
+async def test_stale_ping_from_offline_buffer_does_not_rebroadcast(
+    ws_client_factory, db_session
+):
+    """Regresión: al vaciarse el buffer offline de una unidad, un ping viejo
+    no debe hacer retroceder su posición cacheada si mientras tanto ya
+    llegó una más reciente (ver docstring de _broadcast_latest)."""
+    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+    newer = datetime.now(UTC)
+    older = newer - timedelta(seconds=30)
+
+    async with ws_client_factory() as ws_client:
+        async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
+
+            await ws.send_json(_ping(lat=19.5, lng=-99.2, timestamp=newer.isoformat()))
+            await ws.receive_json()  # ack
+
+            await ws.send_json(_ping(lat=10.0, lng=10.0, timestamp=older.isoformat()))
+            await ws.receive_json()  # ack (se guarda en location_pings igual, solo no se difunde)
+
+    cached = await get_last_position(str(vehicle.id))
+    assert cached is not None
+    assert cached["lat"] == 19.5
+    assert cached["lng"] == -99.2
+
+
+async def test_vehicle_status_change_broadcasts_to_fleet_dashboard(
+    ws_client_factory, db_session, client
+):
+    """POST /vehicles/{id}/status (el switch de "Disponible" del chofer)
+    debe reflejarse en el mapa en vivo sin esperar el siguiente ping."""
+    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+    driver, driver_token = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+
+    listener_task = asyncio.create_task(fleet_module.redis_listener())
+    await asyncio.sleep(0.1)
+
+    try:
+        async with ws_client_factory() as ws_client:
+            # Primero un ping, para que exista un snapshot cacheado que actualizar
+            # (sin ping previo no hay nada que mostrar en el mapa todavía).
+            async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as driver_ws:
+                await driver_ws.receive_json()  # connected
+                await driver_ws.send_json(_ping())
+                await driver_ws.receive_json()  # ack
+
+            async with aconnect_ws(f"/ws/fleet?token={admin_token}", ws_client) as fleet_ws:
+                await fleet_ws.receive_json()  # snapshot
+
+                response = await client.post(
+                    f"/api/v1/vehicles/{vehicle.id}/status",
+                    json={"status": "ocupado"},
+                    headers={"Authorization": f"Bearer {driver_token}"},
+                )
+                assert response.status_code == 200
+
+                update = await asyncio.wait_for(fleet_ws.receive_json(), timeout=2)
+                assert update["type"] == "location_update"
+                assert update["data"]["vehicle_id"] == str(vehicle.id)
+                assert update["data"]["status"] == "ocupado"
+                assert update["data"]["on_trip"] is False
     finally:
         listener_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

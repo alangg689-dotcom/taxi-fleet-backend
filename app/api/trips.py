@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.location import _point
 from app.core.deps import require_roles
 from app.core.dispatch import dispatch_trip
+from app.core.redis_client import publish_vehicle_status_update
 from app.core.whatsapp import send_whatsapp_message
 from app.database import get_db
 from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleAssignment, VehicleStatus
@@ -108,12 +109,22 @@ async def _get_own_driver_or_403(db: AsyncSession, user: User) -> Driver:
 
 async def _set_vehicle_status(db: AsyncSession, vehicle_id: uuid.UUID | None, status_: VehicleStatus) -> None:
     """No toca offline/mantenimiento — esos son decisión de un operador, no
-    algo que el ciclo de vida de un viaje deba pisar."""
+    algo que el ciclo de vida de un viaje deba pisar.
+
+    Los únicos dos valores que este helper recibe en todo el proyecto son
+    OCUPADO (accept/street-hail: arrancó un viaje) y DISPONIBLE
+    (complete/cancel: terminó) — de ahí sale on_trip gratis, sin tener que
+    consultar la tabla de viajes desde el camino caliente de los pings
+    (ver _broadcast_latest en app.api.location)."""
     if vehicle_id is None:
         return
     vehicle = await db.get(Vehicle, vehicle_id)
     if vehicle is not None and vehicle.status in (VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO):
         vehicle.status = status_
+        await db.commit()
+        await publish_vehicle_status_update(
+            str(vehicle_id), status_.value, on_trip=status_ == VehicleStatus.OCUPADO
+        )
 
 
 def _apply_transition(trip: Trip, expected: TripStatus, new: TripStatus) -> None:

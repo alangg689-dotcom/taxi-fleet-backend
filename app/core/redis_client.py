@@ -71,6 +71,23 @@ async def get_all_last_positions() -> list[dict]:
     return [json.loads(v) for v in values if v]
 
 
+async def publish_vehicle_status_update(vehicle_id: str, vehicle_status: str, on_trip: bool) -> None:
+    """Actualiza status/on_trip sobre el último snapshot cacheado y lo vuelve
+    a publicar — así el mapa en vivo refleja un disponible/ocupado/offline (o
+    que arrancó/terminó un viaje) sin esperar el siguiente ping de GPS.
+
+    Si la unidad todavía no mandó ningún ping, no hay snapshot que actualizar
+    — el mapa de todos modos solo muestra unidades que ya reportaron posición,
+    así que no hay nada que publicar todavía."""
+    cached = await get_last_position(vehicle_id)
+    if cached is None:
+        return
+    cached["status"] = vehicle_status
+    cached["on_trip"] = on_trip
+    await set_last_position(vehicle_id, cached)
+    await publish_location_update(cached)
+
+
 # --- Pub/Sub ------------------------------------------------------------------
 
 async def publish_location_update(payload: dict) -> None:

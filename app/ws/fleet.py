@@ -255,7 +255,7 @@ async def driver_socket(
             accepted = await _persist_pings(db, vehicle.id, pings)
             await db.commit()
 
-            await _broadcast_latest(vehicle.id, pings[-1])
+            await _broadcast_latest(vehicle, pings[-1])
 
             # ACK explícito: hasta recibirlo, la app NO debe borrar su buffer
             # local, o un corte de red haría perder posiciones.
