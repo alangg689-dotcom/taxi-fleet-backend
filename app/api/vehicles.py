@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_roles
+from app.core.redis_client import publish_vehicle_status_update
 from app.core.security import generate_token, hash_token
 from app.database import get_db
 from app.models import Driver, User, UserRole, Vehicle, VehicleAssignment
@@ -168,6 +169,13 @@ async def set_vehicle_status(
             raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes el turno de esta unidad")
 
     vehicle.status = payload.status
+    await db.commit()
+
+    # Este endpoint es siempre un cambio manual (switch del chofer o ajuste
+    # de operador) — nunca por un viaje, así que on_trip es False de ley;
+    # accept/complete/cancel llevan su propio aviso (ver _set_vehicle_status
+    # en app.api.trips).
+    await publish_vehicle_status_update(str(vehicle.id), vehicle.status.value, on_trip=False)
     return vehicle
 
 

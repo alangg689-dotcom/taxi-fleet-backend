@@ -64,18 +64,34 @@ async def _persist_pings(
     return result.rowcount or 0
 
 
-async def _broadcast_latest(vehicle_id: uuid.UUID, ping: LocationPingIn) -> None:
-    """Actualiza el cache y publica el evento para todos los dashboards."""
+async def _broadcast_latest(vehicle: Vehicle, ping: LocationPingIn) -> None:
+    """Actualiza el cache y publica el evento para todos los dashboards.
+
+    Compara contra el timestamp ya cacheado antes de difundir: al vaciarse
+    el buffer offline de una unidad, un ping viejo no debe hacer retroceder
+    su posición en el mapa si mientras tanto ya llegó una más reciente por
+    otro canal. `status` sale del propio `vehicle` (sin costo extra, ya
+    viene cargado); `on_trip` no se puede derivar de ahí —"ocupado" es lo
+    mismo tanto en una pausa personal como en un viaje real— así que se
+    preserva el último valor conocido en vez de recalcularlo en cada ping
+    (evitaría una consulta a `trips` en el camino caliente del sistema)."""
+    vehicle_id = str(vehicle.id)
+    cached = await get_last_position(vehicle_id)
+    if cached is not None and ping.timestamp <= datetime.fromisoformat(cached["timestamp"]):
+        return
+
     payload = {
-        "vehicle_id": str(vehicle_id),
+        "vehicle_id": vehicle_id,
         "lat": ping.lat,
         "lng": ping.lng,
         "speed": ping.speed,
         "heading": ping.heading,
         "accuracy": ping.accuracy,
         "timestamp": ping.timestamp.isoformat(),
+        "status": vehicle.status.value,
+        "on_trip": cached.get("on_trip", False) if cached else False,
     }
-    await set_last_position(str(vehicle_id), payload)
+    await set_last_position(vehicle_id, payload)
     await publish_location_update(payload)
 
 
@@ -99,7 +115,7 @@ async def ingest_pings(
     """
     ordered = sorted(payload.pings, key=lambda p: p.timestamp)
     accepted = await _persist_pings(db, vehicle.id, ordered)
-    await _broadcast_latest(vehicle.id, ordered[-1])
+    await _broadcast_latest(vehicle, ordered[-1])
 
     return BatchAccepted(
         accepted=accepted, duplicates=len(ordered) - accepted
