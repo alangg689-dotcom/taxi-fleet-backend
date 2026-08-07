@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geography
-from sqlalchemy import DateTime, Float, ForeignKey, Index, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +50,13 @@ class LocationPing(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    # Capa de validación (spec-sitios-y-fila-v2.md, sección 6): el ping se
+    # guarda siempre para el historial de rutas, pero uno con mala precisión,
+    # un salto imposible, o posible GPS falso no debe mover la máquina de
+    # estados de la fila de sitios. `flag_reason` es None cuando pasó todo.
+    queue_eligible: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    flag_reason: Mapped[str | None] = mapped_column(String(20))
 
     __table_args__ = (
         # Consulta típica: "ruta del vehículo X entre dos fechas".
