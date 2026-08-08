@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     STAND_MAX_SPEED_KMH: float = 5.0
     STAND_EXIT_CONSECUTIVE_PINGS: int = 3        # lecturas seguidas fuera para confirmar salida
     STAND_POLYGON_BUFFER_METERS: int = 15        # holgura al trazar (8-10 en sitios de banqueta angosta)
+    # Decisión de negocio (no está en la spec original): la "inserción
+    # inmediata" con fila vacía deja un hueco — un sitio de esquina con
+    # semáforo insertaría a un carro parado en un alto. Con fila vacía no
+    # hay disputa de orden que resolver, así que el mínimo es mucho más
+    # corto que still_seconds, pero tiene que existir.
+    STAND_EMPTY_QUEUE_MIN_STOP_SECONDS: int = 12
+    STAND_SWEEP_INTERVAL_SECONDS: int = 30       # barrido de cronómetros/pérdida de señal (sección 7)
     QUEUE_PING_MAX_LAG_SECONDS: int = 90         # ping más viejo que esto no mueve la fila
     CLOCK_DRIFT_MAX_SECONDS: int = 60            # |timestamp - received_at| más allá de esto es sospechoso
     QUEUE_SIGNAL_WARN_SECONDS: int = 120         # avisar a la operadora, conserva el lugar
