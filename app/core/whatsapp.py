@@ -1,10 +1,11 @@
 """Envío de mensajes de WhatsApp al cliente, vía la API de Twilio.
 
-Mismo proveedor que ya usa el login por SMS (ver app.core.otp), solo que por
-el canal de WhatsApp: se manda con el prefijo "whatsapp:" tanto en el
-remitente como en el destinatario. Nunca lanza — igual que
-app.core.push, es una respuesta de la conversación, no algo de lo que
-dependa el resto del flujo del webhook para responderle a Twilio a tiempo.
+Único uso que le queda a Twilio en el proyecto — el login de chofer ya no
+pasa por aquí, usa PIN (ver app.api.auth). Se manda con el prefijo
+"whatsapp:" tanto en el remitente como en el destinatario. Nunca lanza —
+igual que app.core.push, es una respuesta de la conversación, no algo de
+lo que dependa el resto del flujo del webhook para responderle a Twilio a
+tiempo.
 """
 
 import logging

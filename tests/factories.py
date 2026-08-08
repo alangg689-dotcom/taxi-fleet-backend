@@ -11,7 +11,13 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _point
-from app.core.security import create_access_token, generate_token, hash_password, hash_token
+from app.core.security import (
+    create_access_token,
+    generate_pin,
+    generate_token,
+    hash_password,
+    hash_token,
+)
 from app.models import (
     Driver,
     DriverStatus,
@@ -54,9 +60,21 @@ async def make_staff_user(
 
 
 async def make_driver(
-    db: AsyncSession, *, phone: str | None = None, license_number: str | None = None
+    db: AsyncSession,
+    *,
+    phone: str | None = None,
+    license_number: str | None = None,
+    with_pin: bool = False,
 ) -> tuple[Driver, str]:
-    """Crea un chofer (User + Driver) y devuelve (driver, access_token)."""
+    """Crea un chofer (User + Driver).
+
+    Por default devuelve (driver, access_token) — la mayoría de las
+    pruebas solo necesitan un chofer ya autenticado, sin pasar por el
+    login de verdad. Con with_pin=True devuelve (driver, pin) en claro en
+    su lugar (mismo patrón que with_device_key en make_vehicle): para
+    probar POST /auth/driver-login hace falta el PIN, no un token ya
+    emitido — pin_hash es NULL por default, igual que en el alta real,
+    así que sin with_pin ese chofer no podría entrar por ese endpoint."""
     phone = phone or f"+5255{uuid.uuid4().int % 10**8:08d}"
     license_number = license_number or f"LIC-{uuid.uuid4().hex[:10]}"
 
@@ -64,15 +82,19 @@ async def make_driver(
     db.add(user)
     await db.flush()
 
+    pin = generate_pin() if with_pin else None
     driver = Driver(
         user_id=user.id,
         full_name="Chofer de prueba",
         license_number=license_number,
         status=DriverStatus.ACTIVO,
+        pin_hash=hash_token(pin) if pin else None,
     )
     db.add(driver)
     await db.flush()
 
+    if with_pin:
+        return driver, pin
     token = create_access_token(str(user.id), UserRole.DRIVER.value)
     return driver, token
 

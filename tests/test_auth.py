@@ -1,9 +1,7 @@
-import app.core.otp as otp_service
 from app.config import settings
 from app.core.security import hash_password
 from app.models import User, UserRole
 from tests.factories import DEFAULT_PASSWORD, auth_headers, make_driver, make_staff_user
-from tests.test_sms import _FakeAsyncClient, _FakeResponse
 
 
 async def test_login_success(client, db_session):
@@ -43,8 +41,8 @@ async def test_login_rejects_password_over_bcrypt_byte_limit(client, db_session)
 
 
 async def test_driver_cannot_login_with_password(client, db_session):
-    """Los choferes entran con teléfono + OTP; /login los rechaza aunque la
-    contraseña sea correcta, para que no quede una ruta alterna sin OTP."""
+    """Los choferes entran con teléfono + PIN; /login los rechaza aunque la
+    contraseña sea correcta, para que no quede una ruta alterna sin PIN."""
     db_session.add(
         User(
             email="chofer-con-password@flotilla.mx",
@@ -61,64 +59,57 @@ async def test_driver_cannot_login_with_password(client, db_session):
     assert response.status_code == 403
 
 
-async def test_otp_flow_issues_tokens(client, db_session, monkeypatch):
-    sent_codes: list[tuple[str, str]] = []
+async def test_driver_login_issues_tokens(client, db_session):
+    driver, pin = await make_driver(db_session, phone="+525511110001", with_pin=True)
 
-    async def _fake_send_sms(phone: str, code: str) -> None:
-        sent_codes.append((phone, code))
-
-    monkeypatch.setattr(otp_service, "send_sms", _fake_send_sms)
-
-    driver, _ = await make_driver(db_session, phone="+525511110001")
-
-    request_resp = await client.post(
-        "/api/v1/auth/otp/request", json={"phone": "+525511110001"}
-    )
-    assert request_resp.status_code == 200
-    assert len(sent_codes) == 1
-    phone, code = sent_codes[0]
-    assert phone == "+525511110001"
-
-    verify_resp = await client.post(
-        "/api/v1/auth/otp/verify", json={"phone": "+525511110001", "code": code}
-    )
-    assert verify_resp.status_code == 200
-    assert verify_resp.json()["access_token"]
-
-
-async def test_otp_verify_wrong_code_rejected(client, db_session, monkeypatch):
-    async def _noop_send_sms(*args, **kwargs) -> None:
-        return None
-
-    monkeypatch.setattr(otp_service, "send_sms", _noop_send_sms)
-    await make_driver(db_session, phone="+525511110002")
-
-    await client.post("/api/v1/auth/otp/request", json={"phone": "+525511110002"})
     response = await client.post(
-        "/api/v1/auth/otp/verify", json={"phone": "+525511110002", "code": "000000"}
+        "/api/v1/auth/driver-login", json={"phone": "+525511110001", "pin": pin}
+    )
+    assert response.status_code == 200
+    assert response.json()["access_token"]
+
+
+async def test_driver_login_wrong_pin_rejected(client, db_session):
+    await make_driver(db_session, phone="+525511110002", with_pin=True)
+
+    response = await client.post(
+        "/api/v1/auth/driver-login", json={"phone": "+525511110002", "pin": "000000"}
     )
     assert response.status_code == 401
 
 
-async def test_otp_request_survives_sms_delivery_failure(client, db_session, monkeypatch):
-    """Si Twilio falla, el endpoint debe seguir respondiendo el mismo mensaje
-    genérico: reflejar el error distinguiría un teléfono registrado (Twilio
-    lo intentó y falló) de uno inexistente (nunca se intenta), rompiendo el
-    diseño anti-enumeración del endpoint."""
-    monkeypatch.setattr(settings, "SMS_PROVIDER", "twilio")
-    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "ACxxxxxxxxxxxxxxxx")
-    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "secret-token")
-    monkeypatch.setattr(settings, "TWILIO_FROM_NUMBER", "+10000000000")
-    monkeypatch.setattr(otp_service.httpx, "AsyncClient", _FakeAsyncClient)
-    _FakeAsyncClient.next_response = _FakeResponse(500, {"message": "Twilio caído"})
+async def test_driver_login_unknown_phone_rejected(client, db_session):
+    response = await client.post(
+        "/api/v1/auth/driver-login", json={"phone": "+525511119999", "pin": "123456"}
+    )
+    assert response.status_code == 401
 
-    await make_driver(db_session, phone="+525511110009")
+
+async def test_driver_login_without_pin_assigned_is_rejected(client, db_session):
+    """Chofer dado de alta pero sin PIN asignado todavía (pin_hash NULL) —
+    no debe poder entrar ni siquiera "adivinando" un PIN vacío o cualquier
+    valor; el mensaje es el mismo 401 genérico de siempre."""
+    driver, _ = await make_driver(db_session, phone="+525511110003")
 
     response = await client.post(
-        "/api/v1/auth/otp/request", json={"phone": "+525511110009"}
+        "/api/v1/auth/driver-login", json={"phone": "+525511110003", "pin": "123456"}
     )
-    assert response.status_code == 200
-    assert "registrado" in response.json()["detail"]
+    assert response.status_code == 401
+
+
+async def test_driver_login_locks_after_max_failed_attempts(client, db_session):
+    await make_driver(db_session, phone="+525511110004", with_pin=True)
+
+    for _ in range(settings.LOGIN_MAX_ATTEMPTS):
+        response = await client.post(
+            "/api/v1/auth/driver-login", json={"phone": "+525511110004", "pin": "000000"}
+        )
+        assert response.status_code == 401
+
+    locked = await client.post(
+        "/api/v1/auth/driver-login", json={"phone": "+525511110004", "pin": "000000"}
+    )
+    assert locked.status_code == 429
 
 
 async def test_refresh_rotates_and_revokes_previous_token(client, db_session):

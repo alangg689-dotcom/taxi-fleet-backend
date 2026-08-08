@@ -19,7 +19,7 @@ class User(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     # email/phone son mutuamente excluyentes según el rol:
-    # choferes se autentican con teléfono + OTP, operadores con email + password.
+    # choferes se autentican con teléfono + PIN, operadores con email + password.
     email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(255))
@@ -58,6 +58,11 @@ class Driver(Base):
     # cerrada). Se sobreescribe en cada registro; no hace falta soportar
     # varios dispositivos por chofer en una flotilla de este tamaño.
     push_token: Mapped[str | None] = mapped_column(String(255))
+    # Login del chofer: teléfono + PIN, asignado por el operador (ver
+    # POST /drivers y POST /drivers/{id}/pin) — reemplaza el OTP por SMS.
+    # Nulo mientras un chofer no tenga PIN asignado (no puede entrar hasta
+    # entonces, igual que "sin device_key" bloquea a una unidad).
+    pin_hash: Mapped[str | None] = mapped_column(String(255))
 
     user: Mapped["User"] = relationship(back_populates="driver")
     assignments: Mapped[list["VehicleAssignment"]] = relationship(

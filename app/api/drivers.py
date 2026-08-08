@@ -1,8 +1,11 @@
 """Endpoints de choferes: alta y gestión del perfil.
 
-Separado a propósito de auth.py (login por OTP) y de vehicles.py
+Separado a propósito de auth.py (login por PIN) y de vehicles.py
 (asignaciones de turno): aquí solo vive el ciclo de vida del perfil del
-chofer, no cómo entra al sistema ni a qué unidad está asignado ahora mismo.
+chofer, no cómo entra al sistema ni a qué unidad está asignado ahora mismo
+— salvo el PIN mismo, que se asigna aquí (al dar de alta o al
+regenerarlo) porque es el operador quien lo entrega, no algo que el
+chofer elija en la app.
 """
 
 import uuid
@@ -12,9 +15,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_roles
+from app.core.security import generate_pin, hash_token
 from app.database import get_db
 from app.models import Driver, User, UserRole
-from app.schemas.driver import DriverCreate, DriverOut, DriverUpdate, PushTokenUpdate
+from app.schemas.driver import DriverCreate, DriverCreated, DriverOut, DriverUpdate, PushTokenUpdate
 
 router = APIRouter(prefix="/drivers", tags=["choferes"])
 
@@ -24,8 +28,11 @@ driver_only = require_roles(UserRole.DRIVER)
 
 
 def _driver_query():
-    """Trae el teléfono desde users: vive ahí, no en drivers, porque el login
-    por OTP es un atributo de la cuenta, no del perfil operativo."""
+    """Trae el teléfono desde users: vive ahí, no en drivers, porque el
+    login (teléfono + PIN) es un atributo de la cuenta, no del perfil
+    operativo. pin_hash nunca se incluye aquí — no hay razón para que
+    salga en ninguna respuesta salvo el PIN en claro, una sola vez, al
+    darlo de alta o regenerarlo."""
     return select(
         Driver.id,
         Driver.user_id,
@@ -44,14 +51,18 @@ async def _get_driver_or_404(db: AsyncSession, driver_id: uuid.UUID) -> Driver:
     return driver
 
 
-@router.post("", response_model=DriverOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=DriverCreated, status_code=status.HTTP_201_CREATED)
 async def create_driver(
     payload: DriverCreate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(admin_only),
 ):
     """Da de alta un chofer: crea su cuenta (rol DRIVER, sin password — entra
-    por teléfono + OTP) y su perfil operativo en un solo paso."""
+    por teléfono + PIN) y su perfil operativo en un solo paso.
+
+    El PIN se genera aquí mismo y se devuelve en claro únicamente en esta
+    respuesta — hay que capturarlo para dárselo al chofer, igual que la
+    clave de dispositivo al dar de alta una unidad."""
     phone_taken = await db.execute(select(User).where(User.phone == payload.phone))
     if phone_taken.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Ya existe una cuenta con ese teléfono")
@@ -66,16 +77,37 @@ async def create_driver(
     db.add(user)
     await db.flush()
 
+    pin = generate_pin()
     driver = Driver(
         user_id=user.id,
         full_name=payload.full_name,
         license_number=payload.license_number,
+        pin_hash=hash_token(pin),
     )
     db.add(driver)
     await db.flush()
 
     result = await db.execute(_driver_query().where(Driver.id == driver.id))
-    return DriverOut(**result.mappings().one())
+    return DriverCreated(**result.mappings().one(), pin=pin)
+
+
+@router.post("/{driver_id}/pin", response_model=DriverCreated)
+async def regenerate_pin(
+    driver_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Genera un PIN nuevo para un chofer que ya existe — el anterior deja
+    de servir de inmediato. Pensado para cuando lo olvida o para dárselo
+    por primera vez a un chofer migrado desde el login por OTP (pin_hash
+    nace en NULL para esos, no pueden entrar hasta que se les asigne uno)."""
+    driver = await _get_driver_or_404(db, driver_id)
+
+    pin = generate_pin()
+    driver.pin_hash = hash_token(pin)
+
+    result = await db.execute(_driver_query().where(Driver.id == driver_id))
+    return DriverCreated(**result.mappings().one(), pin=pin)
 
 
 @router.post("/me/push-token", status_code=status.HTTP_204_NO_CONTENT)

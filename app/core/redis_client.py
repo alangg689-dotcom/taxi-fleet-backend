@@ -2,9 +2,9 @@
 
 Redis cumple cuatro funciones distintas en este sistema:
   1. Cache de la última posición conocida de cada unidad (lectura instantánea).
-  2. Contadores atómicos para rate limiting de OTP y de /auth/login.
+  2. Contadores atómicos para rate limiting de login (operador/admin y chofer).
   3. Pub/Sub como bus de eventos entre instancias del backend.
-  4. Bloqueo temporal de intentos fallidos (OTP y login), sobre el mismo contador.
+  4. Bloqueo temporal de intentos fallidos de login, sobre el mismo contador.
 """
 
 import json
@@ -36,8 +36,8 @@ return current
 
 
 async def incr_with_ttl(key: str, ttl: int) -> int:
-    """Incrementa `key` atómicamente; usado tanto por OTP como por el
-    rate-limit de /auth/login."""
+    """Incrementa `key` atómicamente; usado por app.core.login_throttle
+    (login de operador/admin y de chofer, mismo módulo para ambos)."""
     return int(await redis_client.eval(_INCR_WITH_TTL, 1, key, ttl))
 
 

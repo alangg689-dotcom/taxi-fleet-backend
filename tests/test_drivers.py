@@ -1,4 +1,3 @@
-import app.core.otp as otp_service
 from app.models import UserRole
 from tests.factories import auth_headers, make_driver, make_staff_user
 
@@ -20,6 +19,15 @@ async def test_admin_can_create_driver(client, db_session):
     assert body["phone"] == "+525512340099"
     assert body["full_name"] == "Juan Pérez"
     assert body["status"] == "activo"
+    assert len(body["pin"]) == 6
+    assert body["pin"].isdigit()
+
+    # El PIN funciona de inmediato para /auth/driver-login.
+    login = await client.post(
+        "/api/v1/auth/driver-login",
+        json={"phone": "+525512340099", "pin": body["pin"]},
+    )
+    assert login.status_code == 200
 
 
 async def test_operator_cannot_create_driver(client, db_session):
@@ -175,31 +183,69 @@ async def test_operator_cannot_revoke_driver_access(client, db_session):
     assert response.status_code == 403
 
 
-async def test_deactivated_driver_otp_request_yields_no_code(
-    client, db_session, monkeypatch
+async def test_operator_can_regenerate_driver_pin(client, db_session):
+    """A diferencia de revocar acceso (solo admin), regenerar el PIN es
+    operación diaria — el chofer lo olvida, o hay que dárselo por primera
+    vez a uno migrado del login por OTP."""
+    driver, old_pin = await make_driver(db_session, phone="+525512340094", with_pin=True)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        f"/api/v1/drivers/{driver.id}/pin", headers=auth_headers(operator_token)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["pin"]) == 6
+    assert body["pin"] != old_pin
+
+    old_login = await client.post(
+        "/api/v1/auth/driver-login", json={"phone": "+525512340094", "pin": old_pin}
+    )
+    assert old_login.status_code == 401
+
+    new_login = await client.post(
+        "/api/v1/auth/driver-login", json={"phone": "+525512340094", "pin": body["pin"]}
+    )
+    assert new_login.status_code == 200
+
+
+async def test_driver_cannot_regenerate_own_pin(client, db_session):
+    """Lo asigna el operador — el chofer no puede dárselo a sí mismo."""
+    driver, driver_token = await make_driver(db_session)
+
+    response = await client.post(
+        f"/api/v1/drivers/{driver.id}/pin", headers=auth_headers(driver_token)
+    )
+    assert response.status_code == 403
+
+
+async def test_regenerate_pin_unknown_driver_is_404(client, db_session):
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        "/api/v1/drivers/00000000-0000-0000-0000-000000000000/pin",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 404
+
+
+async def test_deactivated_driver_cannot_login_even_with_correct_pin(
+    client, db_session
 ):
-    """Al revocar el acceso, pedir OTP para ese teléfono no debe generar
-    código — el mismo camino silencioso que un teléfono inexistente, para no
-    delatar la diferencia."""
-    sent_codes: list[tuple[str, str]] = []
-
-    async def _fake_send_sms(phone: str, code: str) -> None:
-        sent_codes.append((phone, code))
-
-    monkeypatch.setattr(otp_service, "send_sms", _fake_send_sms)
-
+    """Al revocar el acceso (User.is_active=False), el PIN correcto ya no
+    debe bastar para entrar — mismo 401 genérico que un teléfono
+    inexistente o un PIN incorrecto, para no delatar la diferencia."""
     _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
-    driver, _ = await make_driver(db_session, phone="+525512340093")
+    driver, pin = await make_driver(db_session, phone="+525512340093", with_pin=True)
 
     await client.post(
         f"/api/v1/drivers/{driver.id}/deactivate", headers=auth_headers(admin_token)
     )
 
     response = await client.post(
-        "/api/v1/auth/otp/request", json={"phone": "+525512340093"}
+        "/api/v1/auth/driver-login", json={"phone": "+525512340093", "pin": pin}
     )
-    assert response.status_code == 200
-    assert sent_codes == []
+    assert response.status_code == 401
 
 
 async def test_driver_can_register_push_token(client, db_session):
