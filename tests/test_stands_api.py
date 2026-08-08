@@ -200,6 +200,39 @@ async def test_patch_overlap_check_excludes_self(client, db_session):
     assert response.status_code == 200
 
 
+async def test_patch_with_apply_buffer_false_keeps_shape_and_configured_holgura(
+    client, db_session
+):
+    """El dashboard, al mover vértices, reenvía el polígono que este mismo
+    endpoint le dio — que YA trae la holgura. Con apply_buffer=False no se
+    vuelve a bufferear (si no, crecería otros 15 m en cada ajuste) y la
+    holgura configurada del sitio se conserva, para que un "trazar de
+    nuevo" posterior sí la aplique."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    headers = auth_headers(admin_token)
+    created = await client.post(
+        "/api/v1/stands",
+        json={"name": "Sitio Centro", "polygon_geojson": _square(), "buffer_meters": 15},
+        headers=headers,
+    )
+    stand_id = created.json()["id"]
+    buffered_polygon = created.json()["polygon_geojson"]
+
+    resaved = await client.patch(
+        f"/api/v1/stands/{stand_id}",
+        json={"polygon_geojson": buffered_polygon, "apply_buffer": False},
+        headers=headers,
+    )
+    assert resaved.status_code == 200
+    body = resaved.json()
+    # La holgura configurada sigue siendo 15, no 0.
+    assert body["polygon_buffer_meters"] == 15
+    # Y la forma no creció: mismo número de vértices que ya tenía.
+    assert len(body["polygon_geojson"]["coordinates"][0]) == len(
+        buffered_polygon["coordinates"][0]
+    )
+
+
 async def test_patch_overlapping_another_stand_is_409(client, db_session):
     _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
     headers = auth_headers(admin_token)
