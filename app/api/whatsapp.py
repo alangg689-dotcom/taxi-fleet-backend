@@ -28,11 +28,12 @@ def _twiml_reply(message: str) -> Response:
 @router.post("/webhook")
 async def whatsapp_webhook(
     From: str = Form(...),
+    Body: str | None = Form(None),
     Latitude: str | None = Form(None),
     Longitude: str | None = Form(None),
 ) -> Response:
     phone = From.removeprefix("whatsapp:")
     latitude = float(Latitude) if Latitude else None
     longitude = float(Longitude) if Longitude else None
-    reply = await handle_incoming_message(phone, latitude, longitude)
+    reply = await handle_incoming_message(phone, latitude, longitude, Body)
     return _twiml_reply(reply)

@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     DISPATCH_POST_TRIP_COOLDOWN_SECONDS: int = 60   # antes de que una unidad recién liberada cuente para otra zona
     DISPATCH_ETA_SPEED_KMH: float = 25.0            # proxy de velocidad para ETA — no hay ruteo real todavía
 
+    # --- Bot de WhatsApp: reintento de viajes atorados ---
+    # Un viaje del bot sin candidatos (o que nadie aceptó) ya NO se cancela
+    # solo — se queda "solicitado" y este barrido lo reintenta, porque la
+    # disponibilidad de la flota cambia con el tiempo (ver app.core.whatsapp_bot).
+    BOT_TRIP_SWEEP_INTERVAL_SECONDS: int = 30
+    BOT_TRIP_MAX_WAIT_SECONDS: int = 1200  # 20 min — tope antes de avisarle al cliente que no hay
+
     # --- Sitios y fila de espera ---
     # Ver spec-sitios-y-fila-v2.md. Los defaults de sitio individual
     # (still_seconds, max_speed_kmh, buffer del polígono) viven como columnas
