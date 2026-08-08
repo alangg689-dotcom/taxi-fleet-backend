@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     DISPATCH_POLL_INTERVAL_SECONDS: float = 1.0     # cada cuánto se revisa si ya respondieron
     DISPATCH_TIER_ADVANTAGE_SECONDS: int = 300      # ventaja mínima para que un escalón inferior salte la fila (sitios)
     DISPATCH_POST_TRIP_COOLDOWN_SECONDS: int = 60   # antes de que una unidad recién liberada cuente para otra zona
+    DISPATCH_ETA_SPEED_KMH: float = 25.0            # proxy de velocidad para ETA — no hay ruteo real todavía
 
     # --- Sitios y fila de espera ---
     # Ver spec-sitios-y-fila-v2.md. Los defaults de sitio individual

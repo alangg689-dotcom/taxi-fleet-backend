@@ -1,7 +1,17 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
-from app.models import UserRole, VehicleStatus
-from tests.factories import auth_headers, make_driver, make_staff_user, make_vehicle
+from sqlalchemy import select
+
+from app.models import StandQueue, StandQueueStatus, UserRole, VehicleStatus
+from tests.factories import (
+    auth_headers,
+    make_driver,
+    make_open_assignment,
+    make_stand,
+    make_staff_user,
+    make_vehicle,
+)
 
 
 async def _dispatch(client, headers, vehicle_id, driver_id, **extra):
@@ -185,6 +195,96 @@ async def test_accept_marks_vehicle_ocupado_and_complete_frees_it(client, db_ses
 
     await db_session.refresh(vehicle)
     assert vehicle.status == VehicleStatus.DISPONIBLE
+
+
+async def _queue_row(db_session, vehicle_id, status: StandQueueStatus) -> StandQueue | None:
+    result = await db_session.execute(
+        select(StandQueue).where(StandQueue.vehicle_id == vehicle_id, StandQueue.status == status)
+    )
+    return result.scalar_one_or_none()
+
+
+async def test_accepting_trip_freezes_formado_entry_as_asignado(client, db_session):
+    """Sección 8 de la spec ("Compensación"): aceptar un viaje no borra el
+    lugar en la fila de una unidad formada, lo congela — desaparecería la
+    prueba de que estuvo ahí si se borrara sin más."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    stand = await make_stand(db_session, center=(19.4326, -99.1332))  # mismo origen que _dispatch
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    driver, driver_token = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    db_session.add(
+        StandQueue(stand_id=stand.id, vehicle_id=vehicle.id, driver_id=driver.id, status=StandQueueStatus.FORMADO)
+    )
+    await db_session.flush()
+
+    created = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+    trip_id = created.json()["id"]
+    await client.post(f"/api/v1/trips/{trip_id}/accept", headers=auth_headers(driver_token))
+
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.FORMADO) is None
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.ASIGNADO) is not None
+
+
+async def test_completing_trip_in_own_zone_leaves_queue_without_reinserting(client, db_session):
+    """Escalón 1: el viaje era de su propia zona — al terminar, sale sin
+    más. Se vuelve a formar sola cuando regrese físicamente al polígono."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    stand = await make_stand(db_session, center=(19.4326, -99.1332))
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    driver, driver_token = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    db_session.add(
+        StandQueue(stand_id=stand.id, vehicle_id=vehicle.id, driver_id=driver.id, status=StandQueueStatus.FORMADO)
+    )
+    await db_session.flush()
+
+    created = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+    trip_id = created.json()["id"]
+    driver_headers = auth_headers(driver_token)
+    await client.post(f"/api/v1/trips/{trip_id}/accept", headers=driver_headers)
+    await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
+    await client.post(f"/api/v1/trips/{trip_id}/complete", headers=driver_headers)
+
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.FORMADO) is None
+    left = await _queue_row(db_session, vehicle.id, StandQueueStatus.ASIGNADO)
+    assert left is None  # ya se movió a "salio", no se quedó pegada en asignado
+
+
+async def test_completing_trip_in_other_zone_reinserts_with_held_position(client, db_session):
+    """Escalón 4: la sacaron de su propia fila para un viaje de otra zona —
+    al terminar, reingresa YA conservando su lugar original, no al final."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    home_stand = await make_stand(db_session, center=(19.4326, -99.1332))
+    other_stand = await make_stand(db_session, center=(19.0, -98.5))  # zona del viaje
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=home_stand.id)
+    driver, driver_token = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    original_entered_at = datetime.now(UTC) - timedelta(minutes=20)
+    db_session.add(
+        StandQueue(
+            stand_id=home_stand.id, vehicle_id=vehicle.id, driver_id=driver.id,
+            status=StandQueueStatus.FORMADO, entered_at=original_entered_at,
+        )
+    )
+    await db_session.flush()
+
+    created = await _dispatch(
+        client, auth_headers(operator_token), vehicle.id, driver.id,
+        origin_lat=19.0, origin_lng=-98.5,
+    )
+    trip_id = created.json()["id"]
+    driver_headers = auth_headers(driver_token)
+    await client.post(f"/api/v1/trips/{trip_id}/accept", headers=driver_headers)
+    await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
+    await client.post(f"/api/v1/trips/{trip_id}/complete", headers=driver_headers)
+
+    reinserted = await _queue_row(db_session, vehicle.id, StandQueueStatus.FORMADO)
+    assert reinserted is not None
+    assert reinserted.stand_id == home_stand.id
+    assert reinserted.position_held is True
+    assert reinserted.entered_at == original_entered_at
+    assert other_stand is not None  # la zona del viaje, solo para que quede claro en la prueba
 
 
 async def test_complete_without_fare_leaves_it_null(client, db_session):

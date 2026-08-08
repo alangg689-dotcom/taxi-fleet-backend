@@ -363,3 +363,94 @@ async def _sweep_candidate_timers(db: AsyncSession) -> None:
         if await _get_active_queue_row(db, vehicle.id) is None:
             await _join_queue(db, vehicle, driver_id, stand)
         await redis_client.delete(key)
+
+
+# --- Prioridad y compensación (sección 8) -------------------------------------
+
+
+async def nearest_stand_id_for_trip(db: AsyncSession, trip_id: uuid.UUID) -> uuid.UUID | None:
+    """La "zona" de un viaje es el sitio activo cuyo centro está más cerca
+    de su origen — usado tanto para ordenar los escalones de prioridad
+    (app.core.dispatch) como para decidir compensación al liberar una
+    unidad (handle_vehicle_freed)."""
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT s.id FROM stands s, trips t
+                WHERE t.id = :trip_id AND s.active = true
+                ORDER BY ST_Distance(s.center, t.origin)
+                LIMIT 1
+                """
+            ),
+            {"trip_id": trip_id},
+        )
+    ).first()
+    return row[0] if row else None
+
+
+async def handle_vehicle_dispatched(db: AsyncSession, vehicle_id: uuid.UUID) -> None:
+    """Se llama cuando una unidad pasa a OCUPADO por aceptar un viaje (ver
+    _set_vehicle_status en app.api.trips). Si estaba FORMADA, congela su
+    lugar como ASIGNADO — deja de contar para el resto de la fila mientras
+    dura el viaje, pero no se borra: handle_vehicle_freed decide qué hacer
+    con ese lugar cuando termine."""
+    entry = await _get_active_queue_row(db, vehicle_id)
+    if entry is None:
+        return
+    entry.status = StandQueueStatus.ASIGNADO
+    await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "offered_trip")
+    await db.commit()
+
+
+async def handle_vehicle_freed(db: AsyncSession, vehicle: Vehicle, trip_id: uuid.UUID) -> None:
+    """Se llama cuando una unidad pasa a DISPONIBLE por completar/cancelar
+    un viaje. Si tenía una fila ASIGNADA de antes (handle_vehicle_dispatched),
+    decide su destino según si el viaje era de su propia zona o de otra
+    (sección 8, "Compensación"):
+      - Propia zona (escalón 1: era la primera de su fila, la mandaron a
+        un viaje de su propio sitio): sale sin más — se vuelve a formar
+        sola cuando regrese físicamente al polígono, como cualquier otra
+        unidad, al final de la fila como corresponde.
+      - Otra zona (escalón 4: la sacaron de su fila para un viaje lejos de
+        su sitio): reingresa YA, conservando el lugar
+        (position_held=True, entered_at original) — no es justo que pierda
+        su turno por haber cubierto un viaje que no era el suyo.
+    """
+    result = await db.execute(
+        select(StandQueue).where(
+            StandQueue.vehicle_id == vehicle.id, StandQueue.status == StandQueueStatus.ASIGNADO
+        )
+    )
+    entry = result.scalar_one_or_none()
+    if entry is None:
+        return
+
+    zone_id = await nearest_stand_id_for_trip(db, trip_id)
+    entry.left_at = datetime.now(UTC)
+
+    if zone_id == entry.stand_id:
+        entry.status = StandQueueStatus.SALIO
+        entry.left_reason = "completed_trip"
+        await db.commit()
+        return
+
+    entry.status = StandQueueStatus.SALIO
+    entry.left_reason = "reassigned_other_zone"
+    # Flush antes del INSERT: el índice único parcial (un formado activo por
+    # unidad) necesita ver esta unidad ya "salio" antes de aceptar la fila
+    # nueva, o las dos filas formado chocan dentro de la misma transacción.
+    await db.flush()
+
+    db.add(
+        StandQueue(
+            stand_id=entry.stand_id,
+            vehicle_id=entry.vehicle_id,
+            driver_id=entry.driver_id,
+            status=StandQueueStatus.FORMADO,
+            position_held=True,
+            entered_at=entry.entered_at,
+        )
+    )
+    await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "position_held")
+    await db.commit()
