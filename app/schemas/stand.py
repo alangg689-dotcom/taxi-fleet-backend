@@ -70,6 +70,11 @@ class StandUpdate(BaseModel):
     still_seconds: int | None = Field(None, ge=0)
     max_speed_kmh: float | None = Field(None, ge=0)
     active: bool | None = None
+    # False cuando el polígono que se manda YA trae la holgura aplicada —
+    # el caso del dashboard al mover vértices sobre la forma que este mismo
+    # endpoint devolvió. Sin esto, cada ajuste la inflaría de nuevo. No
+    # cambia la holgura configurada del sitio, solo si se aplica ahora.
+    apply_buffer: bool = True
 
     _validate_polygon = field_validator("polygon_geojson")(_validate_polygon_geojson)
 

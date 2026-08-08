@@ -154,7 +154,14 @@ async def update_stand(
     """Parcial: solo toca lo que venga en el payload. Mandar
     polygon_geojson reemplaza el polígono y apaga is_placeholder sin tocar
     la fila existente — las unidades ya formadas se quedan formadas, la
-    máquina de estados usa el polígono nuevo desde el siguiente ping."""
+    máquina de estados usa el polígono nuevo desde el siguiente ping.
+
+    `apply_buffer=False` guarda la geometría tal cual, sin volver a pasarle
+    ST_Buffer: es para cuando lo que se manda YA salió de aquí con la
+    holgura aplicada (el dashboard al mover vértices, por ejemplo). Sin
+    eso, cada ajuste inflaría el polígono otros polygon_buffer_meters. La
+    holgura configurada del sitio no se toca en ese caso — solo se cambia
+    mandando buffer_meters explícito."""
     current = await _get_detail_or_404(db, stand_id)
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
@@ -164,20 +171,26 @@ async def update_stand(
     params: dict = {"id": stand_id}
 
     if "polygon_geojson" in updates:
-        buffer_m = updates.get("buffer_meters", current["polygon_buffer_meters"])
-        overlap = await _find_overlap(db, updates["polygon_geojson"], buffer_m, exclude_id=stand_id)
+        configured_buffer = updates.get("buffer_meters", current["polygon_buffer_meters"])
+        # Cuánto buffer aplicar AHORA (0 si la geometría ya lo trae) es una
+        # cosa distinta de la holgura configurada del sitio, que se conserva.
+        buffer_to_apply = configured_buffer if payload.apply_buffer else 0
+        overlap = await _find_overlap(
+            db, updates["polygon_geojson"], buffer_to_apply, exclude_id=stand_id
+        )
         if overlap is not None:
             raise HTTPException(
                 status.HTTP_409_CONFLICT, f"El polígono se encima con el sitio «{overlap['name']}»"
             )
         set_clauses += [
-            "polygon = ST_Buffer(ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)::geography, :buffer_m)",
+            "polygon = ST_Buffer(ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)::geography, :apply_m)",
             "center = ST_SetSRID(ST_Centroid(ST_GeomFromGeoJSON(:geojson)), 4326)::geography",
             "polygon_buffer_meters = :buffer_m",
             "is_placeholder = false",
         ]
         params["geojson"] = json.dumps(updates["polygon_geojson"])
-        params["buffer_m"] = buffer_m
+        params["apply_m"] = buffer_to_apply
+        params["buffer_m"] = configured_buffer
     elif "buffer_meters" in updates:
         # Sin polygon_geojson no hay forma de volver a aplicar el buffer
         # (no se guarda el trazo original sin holgura) — solo actualiza el
