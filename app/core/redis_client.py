@@ -102,6 +102,15 @@ async def publish_location_update(payload: dict) -> None:
     )
 
 
+async def publish_queue_update(payload: dict) -> None:
+    """Publica un cambio en la fila de un sitio — consumido por /ws/fleet
+    (panel de fila del dashboard, paso 7) y /ws/driver (el chofer formado
+    filtra por su propio stand_id, ver app.ws.fleet). Mismo motivo que
+    publish_location_update: la fila puede cambiar desde una instancia
+    distinta a la que tiene abierta la conexión de ese cliente."""
+    await redis_client.publish(settings.QUEUE_CHANNEL, json.dumps(payload, default=str))
+
+
 def driver_offer_channel(driver_id: str) -> str:
     return f"driver:{driver_id}:offers"
 

@@ -21,13 +21,13 @@ mismo patrón que la racha de posible GPS falso en app.core.ping_validation.
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.redis_client import get_last_position, redis_client
+from app.core.redis_client import get_last_position, publish_queue_update, redis_client
 from app.database import SessionLocal
 from app.models import (
     Stand,
@@ -163,6 +163,7 @@ async def _join_queue(
         db, vehicle.id, driver_id, stand.id, "joined_queue", {"position_held": position_held}
     )
     await db.commit()
+    await _broadcast_queue(db, stand.id, "joined_queue", vehicle.id)
     logger.info("Unidad %s se formó en el sitio %s", vehicle.id, stand.id)
     return entry
 
@@ -175,6 +176,7 @@ async def _confirm_exit(db: AsyncSession, entry: StandQueue, reason: str) -> Non
     await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, event)
     await db.commit()
     await redis_client.delete(_signal_warned_key(str(entry.vehicle_id)))
+    await _broadcast_queue(db, entry.stand_id, event, entry.vehicle_id)
     logger.info("Unidad %s salió del sitio %s (%s)", entry.vehicle_id, entry.stand_id, reason)
 
 
@@ -401,6 +403,7 @@ async def handle_vehicle_dispatched(db: AsyncSession, vehicle_id: uuid.UUID) -> 
     entry.status = StandQueueStatus.ASIGNADO
     await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "offered_trip")
     await db.commit()
+    await _broadcast_queue(db, entry.stand_id, "offered_trip", entry.vehicle_id)
 
 
 async def handle_vehicle_freed(db: AsyncSession, vehicle: Vehicle, trip_id: uuid.UUID) -> None:
@@ -433,6 +436,7 @@ async def handle_vehicle_freed(db: AsyncSession, vehicle: Vehicle, trip_id: uuid
         entry.status = StandQueueStatus.SALIO
         entry.left_reason = "completed_trip"
         await db.commit()
+        await _broadcast_queue(db, entry.stand_id, "completed_trip", entry.vehicle_id)
         return
 
     entry.status = StandQueueStatus.SALIO
@@ -454,3 +458,112 @@ async def handle_vehicle_freed(db: AsyncSession, vehicle: Vehicle, trip_id: uuid
     )
     await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "position_held")
     await db.commit()
+    await _broadcast_queue(db, entry.stand_id, "position_held", entry.vehicle_id)
+
+
+# --- Consulta y broadcast de la fila (sección 9) ------------------------------
+
+
+async def get_stand_queue(db: AsyncSession, stand_id: uuid.UUID) -> list[dict]:
+    """Fila ordenada de un sitio — la posición se calcula aquí mismo con
+    ROW_NUMBER(), nunca se guarda como número (ver docstring de
+    StandQueue). Trae placa/nombre del chofer de una vez: tanto
+    GET /stands/{id}/queue como el broadcast de stand:queue los necesitan
+    para pintar algo útil sin una segunda consulta."""
+    rows = await db.execute(
+        text(
+            """
+            SELECT sq.stand_id, sq.vehicle_id, sq.driver_id, sq.entered_at, sq.position_held,
+                   v.plate, d.full_name AS driver_name,
+                   ROW_NUMBER() OVER (ORDER BY sq.position_held DESC, sq.entered_at) AS position
+            FROM stand_queue sq
+            JOIN vehicles v ON v.id = sq.vehicle_id
+            JOIN drivers d ON d.id = sq.driver_id
+            WHERE sq.stand_id = :stand_id AND sq.status = 'formado'
+            ORDER BY position
+            """
+        ),
+        {"stand_id": stand_id},
+    )
+    return [dict(row) for row in rows.mappings().all()]
+
+
+async def get_vehicle_queue_position(db: AsyncSession, vehicle_id: uuid.UUID) -> dict | None:
+    """None si la unidad no está formada en ningún lado ahora mismo — no es
+    un error, es el estado normal de la mayoría de las unidades la mayor
+    parte del tiempo."""
+    entry = await _get_active_queue_row(db, vehicle_id)
+    if entry is None:
+        return None
+    queue = await get_stand_queue(db, entry.stand_id)
+    return next((row for row in queue if row["vehicle_id"] == vehicle_id), None)
+
+
+async def _broadcast_queue(
+    db: AsyncSession, stand_id: uuid.UUID, event: str, vehicle_id: uuid.UUID | None = None
+) -> None:
+    """Publica el estado completo de la fila del sitio — más simple para
+    quien consume (dashboard, app del chofer) que mandar solo el diff y
+    obligarlos a reconstruir el orden ellos mismos."""
+    await publish_queue_update(
+        {
+            "stand_id": stand_id,
+            "event": event,
+            "vehicle_id": vehicle_id,
+            "queue": await get_stand_queue(db, stand_id),
+        }
+    )
+
+
+async def remove_from_queue(
+    db: AsyncSession, entry: StandQueue, reason: str = "operator_override"
+) -> None:
+    """Salida manual — el operador saca a una unidad de la fila a mano
+    (disputa, se fue a comer sin avisar, etc). A diferencia de
+    _confirm_exit (automática, GPS), esta siempre es una decisión humana,
+    de ahí el motivo por default."""
+    entry.status = StandQueueStatus.SALIO
+    entry.left_at = datetime.now(UTC)
+    entry.left_reason = reason
+    await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "operator_override")
+    await db.commit()
+    await _broadcast_queue(db, entry.stand_id, "operator_override", entry.vehicle_id)
+
+
+async def reorder_queue(db: AsyncSession, stand_id: uuid.UUID, vehicle_ids: list[uuid.UUID]) -> list[dict]:
+    """Anula el orden automático de entered_at con uno explícito del
+    operador — `vehicle_ids` debe ser exactamente el conjunto de unidades
+    formadas en este sitio, en el orden nuevo que se quiere. Reescribe
+    entered_at (nunca se guarda una posición numérica, ver StandQueue) y
+    apaga position_held: un reordenamiento manual es la operadora tomando
+    el control, no debe perderse frente al siguiente ping de una unidad
+    que traía el lugar conservado."""
+    current = await get_stand_queue(db, stand_id)
+    current_ids = {row["vehicle_id"] for row in current}
+    if set(vehicle_ids) != current_ids:
+        raise ValueError("vehicle_ids debe incluir exactamente las unidades formadas en este sitio")
+
+    now = datetime.now(UTC)
+    total = len(vehicle_ids)
+    for position, vehicle_id in enumerate(vehicle_ids):
+        # El primero de la lista nueva queda con el entered_at más viejo del
+        # lote (sigue siendo "hace unos segundos", no se dispara a una hora
+        # arbitraria en el pasado).
+        new_entered_at = now - timedelta(seconds=total - position)
+        await db.execute(
+            update(StandQueue)
+            .where(
+                StandQueue.stand_id == stand_id,
+                StandQueue.vehicle_id == vehicle_id,
+                StandQueue.status == StandQueueStatus.FORMADO,
+            )
+            .values(entered_at=new_entered_at, position_held=False)
+        )
+        entry = await _get_active_queue_row(db, vehicle_id)
+        if entry is not None:
+            await _log_event(db, vehicle_id, entry.driver_id, stand_id, "operator_override")
+
+    await db.commit()
+    queue = await get_stand_queue(db, stand_id)
+    await _broadcast_queue(db, stand_id, "operator_override")
+    return queue

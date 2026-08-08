@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     QUEUE_SIGNAL_DROP_SECONDS: int = 420         # sacar de la fila por falta de señal
     GPS_MAX_ACCURACY_METERS: float = 50.0        # peor precisión de ping aceptada para mover la fila
     GPS_MAX_JUMP_KMH: float = 200.0              # salto imposible respecto al ping anterior
+    QUEUE_CHANNEL: str = "stand:queue"           # canal Redis pub/sub — vive en fleet:updates aparte
 
     @property
     def cors_origins(self) -> list[str]:

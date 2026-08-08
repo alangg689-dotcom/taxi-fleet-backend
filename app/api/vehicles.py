@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import require_roles
 from app.core.redis_client import publish_vehicle_status_update
 from app.core.security import generate_token, hash_token
+from app.core.stands import get_vehicle_queue_position
 from app.database import get_db
 from app.models import Driver, Stand, User, UserRole, Vehicle, VehicleAssignment
+from app.schemas.stand import QueuePositionOut
 from app.schemas.vehicle import (
     AssignmentCreate,
     AssignmentOut,
@@ -59,6 +61,36 @@ async def get_vehicle(
     if vehicle is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
     return vehicle
+
+
+@router.get("/{vehicle_id}/queue-position", response_model=QueuePositionOut | None)
+async def get_queue_position(
+    vehicle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_or_staff),
+):
+    """None (200, no 404) si la unidad no está formada ahora mismo — no
+    estar en fila es el estado normal de casi cualquier unidad casi todo
+    el tiempo, no una condición de error. Un chofer solo puede consultar
+    la unidad de su propio turno actual, igual que en POST .../status."""
+    vehicle = await db.get(Vehicle, vehicle_id)
+    if vehicle is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
+
+    if user.role == UserRole.DRIVER:
+        own_driver = await db.execute(select(Driver).where(Driver.user_id == user.id))
+        driver = own_driver.scalar_one_or_none()
+        assignment = await db.execute(
+            select(VehicleAssignment).where(
+                VehicleAssignment.vehicle_id == vehicle_id,
+                VehicleAssignment.ended_at.is_(None),
+            )
+        )
+        current = assignment.scalar_one_or_none()
+        if driver is None or current is None or current.driver_id != driver.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes el turno de esta unidad")
+
+    return await get_vehicle_queue_position(db, vehicle_id)
 
 
 @router.post("", response_model=VehicleCreated, status_code=status.HTTP_201_CREATED)

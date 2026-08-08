@@ -17,9 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.deps import require_roles
+from app.core.stands import get_stand_queue, remove_from_queue, reorder_queue
 from app.database import get_db
-from app.models import Stand, User, UserRole
-from app.schemas.stand import StandCreate, StandDetail, StandOut, StandUpdate
+from app.models import Stand, StandQueue, StandQueueStatus, User, UserRole
+from app.schemas.stand import (
+    QueuePositionOut,
+    QueueReorderRequest,
+    StandCreate,
+    StandDetail,
+    StandOut,
+    StandUpdate,
+)
 
 router = APIRouter(prefix="/stands", tags=["stands"])
 
@@ -187,3 +195,57 @@ async def update_stand(
         await db.commit()
 
     return await _get_detail_or_404(db, stand_id)
+
+
+# --- Fila del sitio -------------------------------------------------------------
+
+
+@router.get("/{stand_id}/queue", response_model=list[QueuePositionOut])
+async def get_queue(
+    stand_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    if await db.get(Stand, stand_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sitio no encontrado")
+    return await get_stand_queue(db, stand_id)
+
+
+@router.post("/{stand_id}/queue/reorder", response_model=list[QueuePositionOut])
+async def reorder_stand_queue(
+    stand_id: uuid.UUID,
+    payload: QueueReorderRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Override manual del orden (evento operator_override) — para
+    disputas en la fila. `vehicle_ids` debe traer exactamente las unidades
+    formadas hoy en este sitio; si no calza, 422 antes de tocar nada."""
+    if await db.get(Stand, stand_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sitio no encontrado")
+    try:
+        return await reorder_queue(db, stand_id, payload.vehicle_ids)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+
+@router.delete("/{stand_id}/queue/{vehicle_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_vehicle_from_queue(
+    stand_id: uuid.UUID,
+    vehicle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Salida manual (evento operator_override) — el chofer se fue sin
+    avisar, o un ajuste que no puede esperar al ciclo automático."""
+    result = await db.execute(
+        select(StandQueue).where(
+            StandQueue.stand_id == stand_id,
+            StandQueue.vehicle_id == vehicle_id,
+            StandQueue.status == StandQueueStatus.FORMADO,
+        )
+    )
+    entry = result.scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Esa unidad no está formada en este sitio")
+    await remove_from_queue(db, entry)
