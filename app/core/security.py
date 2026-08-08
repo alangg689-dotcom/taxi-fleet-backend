@@ -57,13 +57,21 @@ def hash_token(token: str) -> str:
 
 # --- JWT ----------------------------------------------------------------------
 
-def create_access_token(subject: str, role: str, extra: dict | None = None) -> str:
+def create_access_token(
+    subject: str,
+    role: str,
+    extra: dict | None = None,
+    expires_delta: timedelta | None = None,
+) -> str:
+    """`expires_delta` sobrescribe el default de ACCESS_TOKEN_MINUTES — lo
+    usa /auth/driver-login para emitir un token de vida larga
+    (DRIVER_ACCESS_TOKEN_HOURS) sin refresh token de por medio."""
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": subject,
         "role": role,
         "iat": now,
-        "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_MINUTES),
+        "exp": now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_MINUTES)),
         "type": "access",
     }
     if extra:

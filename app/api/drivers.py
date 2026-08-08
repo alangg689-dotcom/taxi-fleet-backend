@@ -32,7 +32,9 @@ def _driver_query():
     login (teléfono + PIN) es un atributo de la cuenta, no del perfil
     operativo. pin_hash nunca se incluye aquí — no hay razón para que
     salga en ninguna respuesta salvo el PIN en claro, una sola vez, al
-    darlo de alta o regenerarlo."""
+    darlo de alta o regenerarlo; has_pin sí (derivado, no el hash) para que
+    el dashboard pueda distinguir a quién todavía le falta asignárselo —
+    los migrados del login por OTP nacieron con pin_hash NULL."""
     return select(
         Driver.id,
         Driver.user_id,
@@ -41,6 +43,7 @@ def _driver_query():
         Driver.license_number,
         Driver.status,
         User.is_active,
+        Driver.pin_hash.isnot(None).label("has_pin"),
     ).join(User, User.id == Driver.user_id)
 
 

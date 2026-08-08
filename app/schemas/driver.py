@@ -35,6 +35,10 @@ class DriverOut(BaseModel):
     license_number: str
     status: DriverStatus
     is_active: bool
+    # Derivado (pin_hash is not None) — nunca el hash mismo. Para que el
+    # dashboard distinga a quién le falta asignarle un PIN todavía (los
+    # migrados del login por OTP nacieron sin uno).
+    has_pin: bool
 
 
 class DriverCreated(DriverOut):
