@@ -32,12 +32,13 @@ from datetime import UTC, datetime, timedelta
 from app.api.location import _point
 from app.core.dispatch import dispatch_trip, find_candidate_drivers
 from app.database import SessionLocal, engine
-from app.models import Trip, TripStatus, UserRole, VehicleStatus
+from app.models import StandQueue, StandQueueStatus, Trip, TripStatus, UserRole, VehicleStatus
 from tests.factories import (
     auth_headers,
     make_driver,
     make_location_ping,
     make_open_assignment,
+    make_stand,
     make_staff_user,
     make_vehicle,
 )
@@ -149,6 +150,138 @@ async def test_find_candidates_excludes_vehicle_not_disponible(db_session):
 
     candidates = await find_candidate_drivers(db_session, trip.id)
     assert candidates == []
+
+
+# --- Escalones de prioridad de sitios (spec-sitios-y-fila-v2.md, sección 8) --
+#
+# DISPATCH_ETA_SPEED_KMH=25 → ~6.94 m/s. DISPATCH_TIER_ADVANTAGE_SECONDS=300s
+# equivalen a ~2083m de diferencia: los offsets de abajo se eligen bien por
+# debajo (no debe ganar el escalón inferior) o bien por arriba (sí debe
+# ganar) de ese margen, nunca cerca, para que la prueba no dependa de un
+# redondeo.
+
+
+async def _formar(db, *, stand, vehicle, driver, entered_at=None):
+    entry = StandQueue(
+        stand_id=stand.id,
+        vehicle_id=vehicle.id,
+        driver_id=driver.id,
+        status=StandQueueStatus.FORMADO,
+        **({"entered_at": entered_at} if entered_at is not None else {}),
+    )
+    db.add(entry)
+    await db.flush()
+    return entry
+
+
+async def test_head_of_queue_wins_within_advantage_margin(db_session):
+    """La primera de la fila gana aunque una unidad rodando esté un poco más
+    cerca — la ventaja de 300s no le alcanza a la rodando."""
+    stand = await make_stand(db_session, center=_ORIGIN)
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+
+    queued_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    queued_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=queued_vehicle.id, driver_id=queued_driver.id)
+    await _formar(db_session, stand=stand, vehicle=queued_vehicle, driver=queued_driver)
+    # ~300m de la unidad formada — dentro del margen, no debe desplazarla.
+    await make_location_ping(
+        db_session, vehicle_id=queued_vehicle.id, timestamp=datetime.now(UTC),
+        lat=_ORIGIN[0] + 0.0027, lng=_ORIGIN[1],
+    )
+
+    roaming_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
+    roaming_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=roaming_vehicle.id, driver_id=roaming_driver.id)
+    await make_location_ping(
+        db_session, vehicle_id=roaming_vehicle.id, timestamp=datetime.now(UTC),
+        lat=_ORIGIN[0], lng=_ORIGIN[1],
+    )
+
+    candidates = await find_candidate_drivers(db_session, trip.id)
+    assert candidates[0].vehicle_id == queued_vehicle.id
+
+
+async def test_much_closer_roaming_unit_beats_head_of_queue(db_session):
+    """Si la unidad formada está bastante más lejos del origen del viaje que
+    una disponible rodando (≥300s de diferencia), gana la rodando — la
+    formada queda de respaldo en la cascada, no desaparece."""
+    stand = await make_stand(db_session, center=_ORIGIN)
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+
+    queued_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    queued_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=queued_vehicle.id, driver_id=queued_driver.id)
+    await _formar(db_session, stand=stand, vehicle=queued_vehicle, driver=queued_driver)
+    # ~5000m del origen — bastante más que el margen de ventaja.
+    await make_location_ping(
+        db_session, vehicle_id=queued_vehicle.id, timestamp=datetime.now(UTC),
+        lat=_ORIGIN[0] + 0.045, lng=_ORIGIN[1],
+    )
+
+    roaming_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
+    roaming_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=roaming_vehicle.id, driver_id=roaming_driver.id)
+    await make_location_ping(
+        db_session, vehicle_id=roaming_vehicle.id, timestamp=datetime.now(UTC),
+        lat=_ORIGIN[0], lng=_ORIGIN[1],
+    )
+
+    candidates = await find_candidate_drivers(db_session, trip.id)
+    assert candidates[0].vehicle_id == roaming_vehicle.id
+    assert queued_vehicle.id in [c.vehicle_id for c in candidates]  # sigue de respaldo
+
+
+async def test_second_in_queue_is_never_offered(db_session):
+    """Solo la primera de la fila es candidata (escalón 1) — la segunda no
+    se ofrece ni siquiera como rodando: está formada, no cuenta ahí."""
+    stand = await make_stand(db_session, center=_ORIGIN)
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+
+    first_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    first_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=first_vehicle.id, driver_id=first_driver.id)
+    await _formar(
+        db_session, stand=stand, vehicle=first_vehicle, driver=first_driver,
+        entered_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    await make_location_ping(
+        db_session, vehicle_id=first_vehicle.id, timestamp=datetime.now(UTC),
+        lat=_ORIGIN[0], lng=_ORIGIN[1],
+    )
+
+    second_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    second_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=second_vehicle.id, driver_id=second_driver.id)
+    await _formar(db_session, stand=stand, vehicle=second_vehicle, driver=second_driver)
+    await make_location_ping(
+        db_session, vehicle_id=second_vehicle.id, timestamp=datetime.now(UTC),
+        lat=_ORIGIN[0], lng=_ORIGIN[1],
+    )
+
+    candidates = await find_candidate_drivers(db_session, trip.id)
+    vehicle_ids = [c.vehicle_id for c in candidates]
+    assert vehicle_ids == [first_vehicle.id]
+
+
+async def test_tier4_offers_other_stands_head_when_own_zone_has_nothing(db_session):
+    """Sin nadie disponible en la zona del viaje (ni formado ni rodando), el
+    escalón 4 ofrece a la primera de la fila de OTRO sitio."""
+    empty_stand = await make_stand(db_session, center=_ORIGIN)
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+
+    other_stand = await make_stand(db_session, center=(19.0, -98.5))
+    other_vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=other_stand.id)
+    other_driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=other_vehicle.id, driver_id=other_driver.id)
+    await _formar(db_session, stand=other_stand, vehicle=other_vehicle, driver=other_driver)
+    await make_location_ping(
+        db_session, vehicle_id=other_vehicle.id, timestamp=datetime.now(UTC), lat=19.0, lng=-98.5
+    )
+
+    candidates = await find_candidate_drivers(db_session, trip.id)
+    assert [c.vehicle_id for c in candidates] == [other_vehicle.id]
+    assert empty_stand is not None  # el sitio de la zona existe, solo no tiene a nadie
 
 
 # --- POST /trips/dispatch ----------------------------------------------------

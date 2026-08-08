@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.push import send_push_notification
 from app.core.redis_client import publish_trip_offer
+from app.core.stands import nearest_stand_id_for_trip
 from app.core.whatsapp import send_whatsapp_message
 from app.database import SessionLocal
 from app.models import Driver, Trip, TripStatus
@@ -58,14 +59,89 @@ class Candidate:
     distance_m: float
 
 
-async def find_candidate_drivers(db: AsyncSession, trip_id: uuid.UUID) -> list[Candidate]:
-    """Candidatos ordenados por cercanía al origen del viaje `trip_id`."""
+def _eta_seconds(distance_m: float) -> float:
+    """Proxy de ETA sin ruteo real: distancia en línea recta a
+    DISPATCH_ETA_SPEED_KMH (spec-sitios-y-fila-v2.md, sección 8)."""
+    return distance_m / (settings.DISPATCH_ETA_SPEED_KMH * 1000 / 3600)
+
+
+async def _tier1_head_of_queue(db: AsyncSession, trip_id: uuid.UUID, zone_id: uuid.UUID) -> list[Candidate]:
+    """Escalón 1: la unidad al frente de la fila del sitio de la zona del
+    viaje. Solo esa — si rechaza, el resto de la cascada sigue con los
+    demás escalones, no con la 2a de la fila (que no es candidata mientras
+    no sea ella la primera)."""
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT sq.vehicle_id, sq.driver_id, ST_Distance(p.location, t.origin) AS distance_m
+                FROM stand_queue sq
+                JOIN trips t ON t.id = :trip_id
+                JOIN LATERAL (
+                    SELECT location FROM location_pings lp
+                    WHERE lp.vehicle_id = sq.vehicle_id
+                    ORDER BY lp.timestamp DESC LIMIT 1
+                ) p ON true
+                WHERE sq.stand_id = :zone_id AND sq.status = 'formado'
+                ORDER BY sq.position_held DESC, sq.entered_at ASC
+                LIMIT 1
+                """
+            ),
+            {"trip_id": trip_id, "zone_id": zone_id},
+        )
+    ).mappings().first()
+    if row is None:
+        return []
+    return [Candidate(driver_id=row["driver_id"], vehicle_id=row["vehicle_id"], distance_m=row["distance_m"])]
+
+
+async def _tier4_other_stands_heads(
+    db: AsyncSession, trip_id: uuid.UUID, zone_id: uuid.UUID
+) -> list[Candidate]:
+    """Escalón 4: la unidad al frente de la fila de CADA OTRO sitio activo,
+    ordenadas por ETA — es el único escalón donde una unidad formada en SU
+    sitio se ofrece para el viaje de otra zona."""
+    rows = await db.execute(
+        text(
+            """
+            SELECT DISTINCT ON (sq.stand_id)
+                   sq.vehicle_id, sq.driver_id, ST_Distance(p.location, t.origin) AS distance_m
+            FROM stand_queue sq
+            JOIN trips t ON t.id = :trip_id
+            JOIN stands s ON s.id = sq.stand_id AND s.active = true AND s.id != :zone_id
+            JOIN LATERAL (
+                SELECT location FROM location_pings lp
+                WHERE lp.vehicle_id = sq.vehicle_id
+                ORDER BY lp.timestamp DESC LIMIT 1
+            ) p ON true
+            WHERE sq.status = 'formado'
+            ORDER BY sq.stand_id, sq.position_held DESC, sq.entered_at ASC
+            """
+        ),
+        {"trip_id": trip_id, "zone_id": zone_id},
+    )
+    candidates = [
+        Candidate(driver_id=r["driver_id"], vehicle_id=r["vehicle_id"], distance_m=r["distance_m"])
+        for r in rows.mappings().all()
+    ]
+    return sorted(candidates, key=lambda c: c.distance_m)
+
+
+async def _tier2_and_tier3_roaming(
+    db: AsyncSession, trip_id: uuid.UUID, zone_id: uuid.UUID | None
+) -> tuple[list[Candidate], list[Candidate]]:
+    """Unidades disponibles rodando (no formadas en ninguna fila): escalón 2
+    si su sitio de origen es la zona del viaje, escalón 3 si es otro.
+    Misma consulta base que la versión sin escalones de find_candidate_drivers,
+    más NOT EXISTS contra stand_queue: una unidad formada solo se ofrece vía
+    escalón 1 (su propia fila) o 4 (la fila de otro sitio), nunca aquí."""
     result = await db.execute(
         text(
             """
             SELECT DISTINCT ON (p.vehicle_id)
                    p.vehicle_id,
                    va.driver_id,
+                   v.stand_id,
                    ST_Distance(p.location, t.origin) AS distance_m
             FROM trips t
             JOIN location_pings p ON true
@@ -81,6 +157,10 @@ async def find_candidate_drivers(db: AsyncSession, trip_id: uuid.UUID) -> list[C
                     AND t2.id != t.id
                     AND t2.status IN :active_statuses
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM stand_queue sq
+                  WHERE sq.vehicle_id = p.vehicle_id AND sq.status = 'formado'
+              )
             ORDER BY p.vehicle_id, p.timestamp DESC
             """
         ).bindparams(bindparam("active_statuses", expanding=True)),
@@ -92,10 +172,69 @@ async def find_candidate_drivers(db: AsyncSession, trip_id: uuid.UUID) -> list[C
         },
     )
     rows = sorted(result.mappings().all(), key=lambda r: r["distance_m"])
-    return [
-        Candidate(driver_id=r["driver_id"], vehicle_id=r["vehicle_id"], distance_m=r["distance_m"])
-        for r in rows[: settings.DISPATCH_MAX_CANDIDATES]
-    ]
+    tier2, tier3 = [], []
+    for r in rows:
+        candidate = Candidate(driver_id=r["driver_id"], vehicle_id=r["vehicle_id"], distance_m=r["distance_m"])
+        (tier2 if r["stand_id"] == zone_id else tier3).append(candidate)
+    return tier2, tier3
+
+
+async def find_candidate_drivers(db: AsyncSession, trip_id: uuid.UUID) -> list[Candidate]:
+    """Candidatos ordenados por los escalones de prioridad de sitios
+    (spec-sitios-y-fila-v2.md, sección 8):
+      1. Primera de la fila del sitio de la zona del viaje.
+      2. Unidad disponible del mismo sitio, rodando (no formada), por ETA.
+      3. Unidad disponible de otro sitio, rodando, por ETA.
+      4. Primera de la fila de cada otro sitio, por ETA.
+
+    Un escalón inferior solo desplaza al mejor candidato encontrado hasta
+    ahora si su ETA es al menos DISPATCH_TIER_ADVANTAGE_SECONDS mejor — si
+    no, gana el escalón más alto que tenga algún candidato. El resto de los
+    escalones (y el resto de cada uno) queda como respaldo de la cascada
+    para cuando el primero rechaza o no responde.
+
+    Si no hay ningún sitio activo (no debería pasar en operación normal:
+    siempre hay al menos los sitios placeholder), se degrada a la lista
+    plana por distancia de antes de que existiera la fila."""
+    zone_id = await nearest_stand_id_for_trip(db, trip_id)
+    tier2, tier3 = await _tier2_and_tier3_roaming(db, trip_id, zone_id)
+
+    if zone_id is None:
+        return sorted(tier2 + tier3, key=lambda c: c.distance_m)[: settings.DISPATCH_MAX_CANDIDATES]
+
+    tiers = {
+        1: await _tier1_head_of_queue(db, trip_id, zone_id),
+        2: tier2,
+        3: tier3,
+        4: await _tier4_other_stands_heads(db, trip_id, zone_id),
+    }
+
+    def best_eta(tier_num: int) -> float | None:
+        candidates = tiers[tier_num]
+        return _eta_seconds(candidates[0].distance_m) if candidates else None
+
+    chosen: int | None = None
+    for tier_num in (1, 2, 3, 4):
+        if not tiers[tier_num]:
+            continue
+        if chosen is None:
+            chosen = tier_num
+            continue
+        challenger_eta = best_eta(tier_num)
+        current_eta = best_eta(chosen)
+        if challenger_eta is not None and current_eta is not None:
+            if challenger_eta <= current_eta - settings.DISPATCH_TIER_ADVANTAGE_SECONDS:
+                chosen = tier_num
+
+    if chosen is None:
+        return []
+
+    ordered = list(tiers[chosen])
+    for tier_num in (1, 2, 3, 4):
+        if tier_num != chosen:
+            ordered.extend(tiers[tier_num])
+
+    return ordered[: settings.DISPATCH_MAX_CANDIDATES]
 
 
 async def _offer_payload(db: AsyncSession, trip: Trip) -> dict:
