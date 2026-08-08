@@ -59,14 +59,20 @@ async def test_driver_cannot_login_with_password(client, db_session):
     assert response.status_code == 403
 
 
-async def test_driver_login_issues_tokens(client, db_session):
+async def test_driver_login_issues_long_lived_token_without_refresh(client, db_session):
+    """Sin refresh_token a propósito (ver DriverTokenResponse): el PIN no
+    se guarda en el teléfono, así que tampoco debe quedar ahí un refresh
+    token que sirva de credencial completa por semanas."""
     driver, pin = await make_driver(db_session, phone="+525511110001", with_pin=True)
 
     response = await client.post(
         "/api/v1/auth/driver-login", json={"phone": "+525511110001", "pin": pin}
     )
     assert response.status_code == 200
-    assert response.json()["access_token"]
+    body = response.json()
+    assert body["access_token"]
+    assert "refresh_token" not in body
+    assert body["expires_in"] == settings.DRIVER_ACCESS_TOKEN_HOURS * 3600
 
 
 async def test_driver_login_wrong_pin_rejected(client, db_session):

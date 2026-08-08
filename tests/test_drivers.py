@@ -21,6 +21,7 @@ async def test_admin_can_create_driver(client, db_session):
     assert body["status"] == "activo"
     assert len(body["pin"]) == 6
     assert body["pin"].isdigit()
+    assert body["has_pin"] is True
 
     # El PIN funciona de inmediato para /auth/driver-login.
     login = await client.post(
@@ -28,6 +29,17 @@ async def test_admin_can_create_driver(client, db_session):
         json={"phone": "+525512340099", "pin": body["pin"]},
     )
     assert login.status_code == 200
+
+
+async def test_driver_without_pin_shows_has_pin_false(client, db_session):
+    """Los migrados del login por OTP nacen con pin_hash NULL — el
+    dashboard usa has_pin para saber a quién le falta habilitar."""
+    await make_driver(db_session, phone="+525512340095")
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.get("/api/v1/drivers", headers=auth_headers(operator_token))
+    driver_row = next(d for d in response.json() if d["phone"] == "+525512340095")
+    assert driver_row["has_pin"] is False
 
 
 async def test_operator_cannot_create_driver(client, db_session):

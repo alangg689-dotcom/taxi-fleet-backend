@@ -10,7 +10,7 @@ Ambos terminan emitiendo el mismo par access/refresh token.
 
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -30,6 +30,7 @@ from app.database import get_db
 from app.models import Driver, RefreshToken, User, UserRole
 from app.schemas.auth import (
     DriverLoginRequest,
+    DriverTokenResponse,
     LoginRequest,
     MessageResponse,
     RefreshRequest,
@@ -66,14 +67,21 @@ async def _issue_token_pair(
 
 # --- Login con PIN (choferes) --------------------------------------------------
 
-@router.post("/driver-login", response_model=TokenPair)
+@router.post("/driver-login", response_model=DriverTokenResponse)
 async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(get_db)):
     """Teléfono + PIN — el PIN lo asigna el operador (POST /drivers o
     POST /drivers/{id}/pin), no lo elige el chofer. Un solo paso, a
     diferencia del OTP anterior: no hay nada que enumerar aparte con un
     segundo endpoint, así que el throttle y el mensaje genérico de error
     (igual sea teléfono inexistente, sin PIN asignado, o PIN incorrecto)
-    bastan, mismo patrón que /auth/login."""
+    bastan, mismo patrón que /auth/login.
+
+    Sin refresh token: emite directo un access token de
+    DRIVER_ACCESS_TOKEN_HOURS (no pasa por _issue_token_pair, que sí crea
+    uno). Decisión de negocio — el PIN no se guarda en el teléfono, así
+    que tampoco debe quedar ahí un refresh token de larga vida que
+    reemplace esa protección: un aparato perdido o prestado no debe seguir
+    siendo la credencial completa más allá de lo que dure el turno."""
     try:
         await login_throttle.check_not_locked(payload.phone)
     except login_throttle.LoginLockedError as exc:
@@ -98,7 +106,14 @@ async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(g
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
 
     await login_throttle.reset(payload.phone)
-    return await _issue_token_pair(db, user, payload.device_info)
+    access = create_access_token(
+        str(user.id),
+        user.role.value,
+        expires_delta=timedelta(hours=settings.DRIVER_ACCESS_TOKEN_HOURS),
+    )
+    return DriverTokenResponse(
+        access_token=access, expires_in=settings.DRIVER_ACCESS_TOKEN_HOURS * 3600
+    )
 
 
 # --- Login con contraseña (operadores) ----------------------------------------

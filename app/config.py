@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 15
     REFRESH_TOKEN_DAYS: int = 30
+    # El chofer no usa refresh token (ver POST /auth/driver-login): un access
+    # token largo que cubre un turno completo en vez de renovación en
+    # silencio — así el teléfono nunca guarda una credencial reutilizable
+    # más allá de lo que dure el turno. 16h porque los turnos se estiran y no
+    # debe expirar a media jornada.
+    DRIVER_ACCESS_TOKEN_HOURS: int = 16
 
     # --- Login (throttle compartido: email de operador/admin o teléfono de chofer) ---
     LOGIN_MAX_ATTEMPTS: int = 5          # fallos antes de bloquear

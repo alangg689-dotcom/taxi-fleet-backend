@@ -6,7 +6,6 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 class DriverLoginRequest(BaseModel):
     phone: str = Field(..., min_length=10, max_length=20, examples=["+525512345678"])
     pin: str = Field(..., min_length=4, max_length=8)
-    device_info: str | None = Field(None, max_length=255, examples=["Pixel 7 / Android 14"])
 
 
 class LoginRequest(BaseModel):
@@ -35,6 +34,16 @@ class TokenPair(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # segundos de vida del access token
+
+
+class DriverTokenResponse(BaseModel):
+    """Sin refresh_token a propósito — ver POST /auth/driver-login: el
+    chofer no tiene forma de renovar en silencio, cuando expires_in se
+    cumple tiene que volver a capturar su PIN."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # segundos de vida del access token (DRIVER_ACCESS_TOKEN_HOURS)
 
 
 class MessageResponse(BaseModel):
