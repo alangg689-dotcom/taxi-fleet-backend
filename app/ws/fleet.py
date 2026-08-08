@@ -105,28 +105,61 @@ async def _forward_trip_offers(websocket: WebSocket, pubsub) -> None:
             await pubsub.aclose()
 
 
+async def _forward_queue_updates(websocket: WebSocket, pubsub, stand_id: str) -> None:
+    """Igual que _forward_trip_offers pero para la fila del propio sitio:
+    stand:queue es un canal único para todos los sitios (ver
+    app.core.stands._broadcast_queue), así que aquí se descarta lo que no
+    sea del sitio de esta unidad — el chofer no necesita ver la fila de
+    otro sitio."""
+    try:
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = json.loads(message["data"])
+            if data.get("stand_id") != stand_id:
+                continue
+            await websocket.send_text(json.dumps({"type": "queue_update", "data": data}))
+    except asyncio.CancelledError:
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            await pubsub.unsubscribe()
+            await pubsub.aclose()
+
+
+_CHANNEL_MESSAGE_TYPES = {
+    settings.LOCATION_CHANNEL: "location_update",
+    settings.QUEUE_CHANNEL: "queue_update",
+}
+
+
 async def redis_listener() -> None:
-    """Tarea de fondo: escucha el canal de Redis y reenvía a los dashboards.
+    """Tarea de fondo: escucha los canales de Redis y reenvía a los
+    dashboards — posición en vivo (fleet:updates) y fila de sitios
+    (stand:queue, sección 9) por la misma conexión.
 
     Se arranca una vez al iniciar la aplicación (ver main.py). Cada instancia
     del backend corre su propia copia de este listener.
     """
     pubsub = redis_client.pubsub()
-    await pubsub.subscribe(settings.LOCATION_CHANNEL)
-    logger.info("Suscrito al canal %s", settings.LOCATION_CHANNEL)
+    await pubsub.subscribe(*_CHANNEL_MESSAGE_TYPES)
+    logger.info("Suscrito a los canales %s", list(_CHANNEL_MESSAGE_TYPES))
 
     try:
         async for message in pubsub.listen():
             if message.get("type") != "message":
                 continue
+            message_type = _CHANNEL_MESSAGE_TYPES.get(message["channel"])
+            if message_type is None:
+                continue
             await manager.broadcast(
-                json.dumps({"type": "location_update", "data": json.loads(message["data"])})
+                json.dumps({"type": message_type, "data": json.loads(message["data"])})
             )
     except asyncio.CancelledError:
         raise
     finally:
         with contextlib.suppress(Exception):
-            await pubsub.unsubscribe(settings.LOCATION_CHANNEL)
+            await pubsub.unsubscribe(*_CHANNEL_MESSAGE_TYPES)
             await pubsub.aclose()
 
 
@@ -207,11 +240,16 @@ async def driver_socket(
 
     # Suscrito ANTES de aceptar la conexión (y por lo tanto antes de que este
     # chofer pueda volverse candidato de un despacho): ver el porqué en el
-    # docstring de _forward_trip_offers.
+    # docstring de _forward_trip_offers. Misma razón para la fila: sin turno
+    # abierto la unidad nunca puede estar formada (ver evaluate_ping_for_queue),
+    # así que no vale la pena suscribirse.
     offers_pubsub = None
+    queue_pubsub = None
     if current_driver_id is not None:
         offers_pubsub = redis_client.pubsub()
         await offers_pubsub.subscribe(driver_offer_channel(str(current_driver_id)))
+        queue_pubsub = redis_client.pubsub()
+        await queue_pubsub.subscribe(settings.QUEUE_CHANNEL)
 
     await websocket.accept()
     logger.info("Chofer conectado; unidad %s", vehicle.plate)
@@ -233,9 +271,14 @@ async def driver_socket(
     )
 
     offers_task: asyncio.Task | None = None
+    queue_task: asyncio.Task | None = None
     try:
         if offers_pubsub is not None:
             offers_task = asyncio.create_task(_forward_trip_offers(websocket, offers_pubsub))
+        if queue_pubsub is not None:
+            queue_task = asyncio.create_task(
+                _forward_queue_updates(websocket, queue_pubsub, str(vehicle.stand_id))
+            )
 
         while True:
             raw = await websocket.receive_text()
@@ -269,3 +312,7 @@ async def driver_socket(
             offers_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await offers_task
+        if queue_task is not None:
+            queue_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await queue_task

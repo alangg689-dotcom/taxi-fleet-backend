@@ -8,6 +8,7 @@ que calcular la holgura a mano. StandOut es lo mínimo para listas/selectores
 sitio puntual.
 """
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -71,3 +72,25 @@ class StandUpdate(BaseModel):
     active: bool | None = None
 
     _validate_polygon = field_validator("polygon_geojson")(_validate_polygon_geojson)
+
+
+class QueuePositionOut(BaseModel):
+    """Una fila de la fila de un sitio (sección 9). `position` sale de
+    ROW_NUMBER() en la consulta — nunca se guarda como número, ver
+    app.models.stand.StandQueue."""
+
+    stand_id: UUID
+    vehicle_id: UUID
+    driver_id: UUID
+    plate: str
+    driver_name: str
+    position: int
+    position_held: bool
+    entered_at: datetime
+
+
+class QueueReorderRequest(BaseModel):
+    """El orden nuevo, completo — debe incluir exactamente las unidades hoy
+    formadas en el sitio, ni más ni menos (ver app.core.stands.reorder_queue)."""
+
+    vehicle_ids: list[UUID] = Field(..., min_length=1)

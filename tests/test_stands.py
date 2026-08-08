@@ -328,3 +328,32 @@ async def test_sweep_promotes_expired_candidate_without_new_ping(db_session):
     await _sweep_candidate_timers(db_session)
 
     assert await _active_entry(db_session, vehicle.id) is not None
+
+
+# --- Broadcast (sección 9: canal stand:queue) --------------------------------
+
+
+async def test_joining_queue_broadcasts_to_stand_queue_channel(db_session):
+    stand, vehicle, _ = await _setup(db_session)
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(settings.QUEUE_CHANNEL)
+    # get_message() solo lee UN mensaje por llamada — la primera es la
+    # confirmación del propio SUBSCRIBE, no un mensaje publicado.
+    await pubsub.get_message(timeout=1.0)
+    try:
+        await evaluate_ping_for_queue(db_session, vehicle, _ping())  # arranca el cronómetro
+        await _backdate_candidate(
+            vehicle.id, stand.id, settings.STAND_EMPTY_QUEUE_MIN_STOP_SECONDS + 1
+        )
+        await evaluate_ping_for_queue(db_session, vehicle, _ping())  # ahora sí se forma
+
+        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=2.0)
+        assert message is not None
+        payload = json.loads(message["data"])
+        assert payload["stand_id"] == str(stand.id)
+        assert payload["event"] == "joined_queue"
+        assert payload["vehicle_id"] == str(vehicle.id)
+        assert [row["vehicle_id"] for row in payload["queue"]] == [str(vehicle.id)]
+    finally:
+        await pubsub.unsubscribe(settings.QUEUE_CHANNEL)
+        await pubsub.aclose()

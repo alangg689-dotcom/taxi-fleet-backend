@@ -1,4 +1,4 @@
-from app.models import UserRole, VehicleStatus
+from app.models import StandQueue, StandQueueStatus, UserRole, VehicleStatus
 from tests.factories import (
     auth_headers,
     make_driver,
@@ -301,3 +301,64 @@ async def test_regenerate_device_key_unknown_vehicle_is_404(client, db_session):
         headers=auth_headers(operator_token),
     )
     assert response.status_code == 404
+
+
+# --- GET /vehicles/{id}/queue-position ---------------------------------------
+
+
+async def test_queue_position_is_null_when_not_queued(client, db_session):
+    """No estar formada es el estado normal de casi cualquier unidad casi
+    todo el tiempo — 200 con null, no 404."""
+    vehicle = await make_vehicle(db_session)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.get(
+        f"/api/v1/vehicles/{vehicle.id}/queue-position", headers=auth_headers(operator_token)
+    )
+    assert response.status_code == 200
+    assert response.json() is None
+
+
+async def test_queue_position_reflects_formado_entry(client, db_session):
+    stand = await make_stand(db_session)
+    vehicle = await make_vehicle(db_session, stand_id=stand.id)
+    driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    db_session.add(
+        StandQueue(
+            stand_id=stand.id, vehicle_id=vehicle.id, driver_id=driver.id,
+            status=StandQueueStatus.FORMADO,
+        )
+    )
+    await db_session.flush()
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.get(
+        f"/api/v1/vehicles/{vehicle.id}/queue-position", headers=auth_headers(operator_token)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["position"] == 1
+    assert body["stand_id"] == str(stand.id)
+
+
+async def test_driver_can_see_their_own_vehicle_queue_position(client, db_session):
+    vehicle = await make_vehicle(db_session)
+    driver, driver_token = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+
+    response = await client.get(
+        f"/api/v1/vehicles/{vehicle.id}/queue-position", headers=auth_headers(driver_token)
+    )
+    assert response.status_code == 200
+
+
+async def test_driver_cannot_see_another_vehicles_queue_position(client, db_session):
+    vehicle = await make_vehicle(db_session)
+    _, driver_token = await make_driver(db_session)
+    # Sin make_open_assignment: este chofer no tiene el turno de esta unidad.
+
+    response = await client.get(
+        f"/api/v1/vehicles/{vehicle.id}/queue-position", headers=auth_headers(driver_token)
+    )
+    assert response.status_code == 403
