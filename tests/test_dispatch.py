@@ -437,23 +437,12 @@ async def test_staff_cannot_reject(client, db_session):
     assert response.status_code == 403
 
 
-async def test_dispatch_without_candidates_cancels_bot_trip(monkeypatch):
-    """Un viaje de operador se queda "solicitado" cuando no hay candidatos
-    (documentado arriba y en el README) para que quede visible en el
-    dashboard y alguien lo redespache a mano. Uno del bot de WhatsApp no
-    tiene a nadie viendo un dashboard — dejarlo "solicitado" para siempre
-    bloquearía que ese cliente pudiera volver a pedir un taxi (ver
-    _trip_still_active en app.core.whatsapp_bot), así que dispatch_trip lo
-    cancela en cuanto se rinde."""
-    import app.core.dispatch as dispatch_module
-
-    sent = []
-
-    async def _fake_send(phone, body):
-        sent.append((phone, body))
-
-    monkeypatch.setattr(dispatch_module, "send_whatsapp_message", _fake_send)
-
+async def test_dispatch_without_candidates_leaves_bot_trip_pending(monkeypatch):
+    """Ya NO se cancela a la primera pasada sin candidatos: la
+    disponibilidad de la flota cambia con el tiempo, así que el viaje se
+    queda "solicitado" y app.core.whatsapp_bot.sweep_stuck_bot_trips lo
+    reintenta. Antes se cancelaba aquí mismo, lo que le daba al cliente un
+    "no hay taxis" por una unidad que segundos después sí estaba libre."""
     async with SessionLocal() as db:
         trip = Trip(
             origin=_point(19.4326, -99.1332),
@@ -469,8 +458,6 @@ async def test_dispatch_without_candidates_cancels_bot_trip(monkeypatch):
 
     async with SessionLocal() as db:
         trip = await db.get(Trip, trip_id)
-        assert trip.status == TripStatus.CANCELADO
-
-    assert sent == [("+525512340099", "Por ahora no hay taxis disponibles cerca de ti. Intenta de nuevo en unos minutos.")]
+        assert trip.status == TripStatus.SOLICITADO
 
     await engine.dispose()

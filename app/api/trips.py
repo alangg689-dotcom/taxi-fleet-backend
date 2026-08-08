@@ -23,9 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _point
 from app.core.deps import require_roles
-from app.core.dispatch import dispatch_trip
-from app.core.redis_client import publish_vehicle_status_update
-from app.core.stands import handle_vehicle_dispatched, handle_vehicle_freed
+from app.core.dispatch import dispatch_trip, set_vehicle_status
 from app.core.whatsapp import send_whatsapp_message
 from app.database import get_db
 from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleAssignment, VehicleStatus
@@ -106,40 +104,6 @@ async def _get_own_driver_or_403(db: AsyncSession, user: User) -> Driver:
     if driver is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Esta acción es solo para choferes")
     return driver
-
-
-async def _set_vehicle_status(
-    db: AsyncSession,
-    vehicle_id: uuid.UUID | None,
-    status_: VehicleStatus,
-    *,
-    trip_id: uuid.UUID | None = None,
-) -> None:
-    """No toca offline/mantenimiento — esos son decisión de un operador, no
-    algo que el ciclo de vida de un viaje deba pisar.
-
-    Los únicos dos valores que este helper recibe en todo el proyecto son
-    OCUPADO (accept/street-hail: arrancó un viaje) y DISPONIBLE
-    (complete/cancel: terminó) — de ahí sale on_trip gratis, sin tener que
-    consultar la tabla de viajes desde el camino caliente de los pings
-    (ver _broadcast_latest en app.api.location). Ese mismo par de valores es
-    el gancho natural de la fila de sitios (sección 8 de la spec,
-    "Compensación"): OCUPADO congela el lugar de una unidad formada,
-    DISPONIBLE decide qué hacer con ese lugar — por eso `trip_id` (para
-    saber si el viaje era de su propia zona) solo hace falta en ese caso."""
-    if vehicle_id is None:
-        return
-    vehicle = await db.get(Vehicle, vehicle_id)
-    if vehicle is not None and vehicle.status in (VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO):
-        vehicle.status = status_
-        await db.commit()
-        await publish_vehicle_status_update(
-            str(vehicle_id), status_.value, on_trip=status_ == VehicleStatus.OCUPADO
-        )
-        if status_ == VehicleStatus.OCUPADO:
-            await handle_vehicle_dispatched(db, vehicle_id)
-        elif status_ == VehicleStatus.DISPONIBLE and trip_id is not None:
-            await handle_vehicle_freed(db, vehicle, trip_id)
 
 
 def _apply_transition(trip: Trip, expected: TripStatus, new: TripStatus) -> None:
@@ -261,7 +225,7 @@ async def start_street_hail(
     )
     db.add(trip)
     await db.flush()
-    await _set_vehicle_status(db, vehicle.id, VehicleStatus.OCUPADO)
+    await set_vehicle_status(db, vehicle.id, VehicleStatus.OCUPADO)
     return await _get_trip_out(db, trip.id)
 
 
@@ -353,7 +317,7 @@ async def accept_trip(
     if trip.driver_id is not None:
         await _authorize_trip(trip, user, db)
         _apply_transition(trip, TripStatus.SOLICITADO, TripStatus.ASIGNADO)
-        await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
+        await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
         return await _get_trip_out(db, trip_id)
 
     driver = await _get_own_driver_or_403(db, user)
@@ -368,7 +332,7 @@ async def accept_trip(
     trip.offered_driver_id = None
     trip.offered_vehicle_id = None
     trip.offer_expires_at = None
-    await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
+    await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
 
     if trip.customer_phone:
         vehicle = await db.get(Vehicle, trip.vehicle_id)
@@ -432,7 +396,7 @@ async def complete_trip(
     _apply_transition(trip, TripStatus.EN_CURSO, TripStatus.COMPLETADO)
     trip.completed_at = datetime.now(UTC)
     trip.fare = payload.fare
-    await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE, trip_id=trip.id)
+    await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE, trip_id=trip.id)
     return await _get_trip_out(db, trip_id)
 
 
@@ -449,5 +413,5 @@ async def cancel_trip(
             status.HTTP_409_CONFLICT, f"El viaje ya está '{trip.status.value}'"
         )
     trip.status = TripStatus.CANCELADO
-    await _set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE, trip_id=trip.id)
+    await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE, trip_id=trip.id)
     return await _get_trip_out(db, trip_id)

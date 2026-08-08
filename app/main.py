@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,35 +13,55 @@ from app.api import auth, drivers, location, stands, trips, vehicles, whatsapp
 from app.config import settings
 from app.core.redis_client import redis_client
 from app.core.stands import sweep_stand_queues
+from app.core.whatsapp_bot import sweep_stuck_bot_trips
 from app.ws import fleet
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def _stand_queue_sweep_loop() -> None:
-    """Dispara sweep_stand_queues cada STAND_SWEEP_INTERVAL_SECONDS — lo que
-    no depende de que llegue un ping nuevo (pérdida de señal, cronómetros de
-    candidato que ya cumplieron su tiempo). Ver app.core.stands, sección 7
-    de spec-sitios-y-fila-v2.md."""
+async def _sweep_loop(
+    sweep: Callable[[], Awaitable[None]], interval_seconds: int, description: str
+) -> None:
+    """Corre `sweep` cada `interval_seconds`, para siempre. El try/except es
+    por iteración a propósito: un error en una pasada (Redis parpadeó, un
+    deadlock) no debe matar el barrido para el resto de la vida del
+    proceso."""
     while True:
         try:
-            await sweep_stand_queues()
+            await sweep()
         except Exception:
-            logger.exception("Error en el barrido de sitios/fila")
-        await asyncio.sleep(settings.STAND_SWEEP_INTERVAL_SECONDS)
+            logger.exception("Error en el barrido de %s", description)
+        await asyncio.sleep(interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # El listener de Redis debe vivir tanto como la aplicación: es lo que
     # conecta los pings entrantes con los dashboards de esta instancia.
-    listener = asyncio.create_task(fleet.redis_listener())
-    sweep = asyncio.create_task(_stand_queue_sweep_loop())
+    tasks = [
+        asyncio.create_task(fleet.redis_listener()),
+        # Fila de sitios: pérdida de señal y cronómetros de candidato que
+        # cumplieron sin que llegara un ping nuevo (spec de sitios, sección 7).
+        asyncio.create_task(
+            _sweep_loop(
+                sweep_stand_queues, settings.STAND_SWEEP_INTERVAL_SECONDS, "sitios/fila"
+            )
+        ),
+        # Viajes del bot que quedaron "solicitado" sin candidatos: se
+        # reintentan aquí en vez de cancelarse a la primera pasada.
+        asyncio.create_task(
+            _sweep_loop(
+                sweep_stuck_bot_trips,
+                settings.BOT_TRIP_SWEEP_INTERVAL_SECONDS,
+                "viajes del bot",
+            )
+        ),
+    ]
     yield
-    for task in (listener, sweep):
+    for task in tasks:
         task.cancel()
-    for task in (listener, sweep):
+    for task in tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await task
     await redis_client.aclose()

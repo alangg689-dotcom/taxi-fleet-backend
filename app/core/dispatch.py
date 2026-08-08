@@ -41,13 +41,51 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.push import send_push_notification
-from app.core.redis_client import publish_trip_offer
-from app.core.stands import nearest_stand_id_for_trip
-from app.core.whatsapp import send_whatsapp_message
+from app.core.redis_client import publish_trip_offer, publish_vehicle_status_update
+from app.core.stands import handle_vehicle_dispatched, handle_vehicle_freed, nearest_stand_id_for_trip
 from app.database import SessionLocal
-from app.models import Driver, Trip, TripStatus
+from app.models import Driver, Trip, TripStatus, Vehicle, VehicleStatus
 
 logger = logging.getLogger(__name__)
+
+
+async def set_vehicle_status(
+    db: AsyncSession,
+    vehicle_id: uuid.UUID | None,
+    status_: VehicleStatus,
+    *,
+    trip_id: uuid.UUID | None = None,
+) -> None:
+    """No toca offline/mantenimiento — esos son decisión de un operador, no
+    algo que el ciclo de vida de un viaje deba pisar.
+
+    Vive aquí (no en app.api.trips, donde nació) porque es lógica de
+    negocio pura sin nada de HTTP, y app.core.whatsapp_bot también la
+    necesita para el comando CANCELAR — un módulo de app.core no debe
+    importar de app.api.
+
+    Los únicos dos valores que este helper recibe en todo el proyecto son
+    OCUPADO (accept/street-hail: arrancó un viaje) y DISPONIBLE
+    (complete/cancel: terminó) — de ahí sale on_trip gratis, sin tener que
+    consultar la tabla de viajes desde el camino caliente de los pings
+    (ver _broadcast_latest en app.api.location). Ese mismo par de valores es
+    el gancho natural de la fila de sitios (sección 8 de la spec,
+    "Compensación"): OCUPADO congela el lugar de una unidad formada,
+    DISPONIBLE decide qué hacer con ese lugar — por eso `trip_id` (para
+    saber si el viaje era de su propia zona) solo hace falta en ese caso."""
+    if vehicle_id is None:
+        return
+    vehicle = await db.get(Vehicle, vehicle_id)
+    if vehicle is not None and vehicle.status in (VehicleStatus.DISPONIBLE, VehicleStatus.OCUPADO):
+        vehicle.status = status_
+        await db.commit()
+        await publish_vehicle_status_update(
+            str(vehicle_id), status_.value, on_trip=status_ == VehicleStatus.OCUPADO
+        )
+        if status_ == VehicleStatus.OCUPADO:
+            await handle_vehicle_dispatched(db, vehicle_id)
+        elif status_ == VehicleStatus.DISPONIBLE and trip_id is not None:
+            await handle_vehicle_freed(db, vehicle, trip_id)
 
 _ACTIVE_STATUSES = ("solicitado", "asignado", "en_curso")
 
@@ -289,21 +327,13 @@ async def dispatch_trip(trip_id: uuid.UUID) -> None:
         payload_base = await _offer_payload(db, trip)
 
     if not candidates:
+        # Se queda "solicitado" sin más — ni para un viaje de operador ni
+        # para uno del bot: la disponibilidad de la flota cambia con el
+        # tiempo, y app.core.whatsapp_bot.sweep_stuck_bot_trips reintenta
+        # los del bot periódicamente en vez de rendirse a la primera
+        # pasada (ver esa función para el tope de espera y el aviso al
+        # cliente cuando de verdad se agota).
         logger.info("Viaje %s: sin unidades candidatas cerca del origen", trip_id)
-        if trip.customer_phone:
-            # Un viaje del bot que se queda "solicitado" para siempre bloquea
-            # que ese número pueda pedir otro (ver _trip_still_active en
-            # app.core.whatsapp_bot) — a diferencia de uno de operador, aquí
-            # no hay nadie viendo el dashboard para redespacharlo a mano.
-            async with SessionLocal() as db:
-                trip = await db.get(Trip, trip_id)
-                if trip is not None and trip.status == TripStatus.SOLICITADO:
-                    trip.status = TripStatus.CANCELADO
-                    await db.commit()
-            await send_whatsapp_message(
-                trip.customer_phone,
-                "Por ahora no hay taxis disponibles cerca de ti. Intenta de nuevo en unos minutos.",
-            )
         return
 
     for candidate in candidates:
@@ -342,19 +372,11 @@ async def dispatch_trip(trip_id: uuid.UUID) -> None:
     async with SessionLocal() as db:
         trip = await db.get(Trip, trip_id)
         if trip is not None and trip.status == TripStatus.SOLICITADO:
+            # Igual que arriba: se limpia la oferta y se deja "solicitado"
+            # para que el barrido del bot (o el operador, a mano) lo
+            # vuelva a intentar — no se cancela solo.
             trip.offered_driver_id = None
             trip.offered_vehicle_id = None
             trip.offer_expires_at = None
-            customer_phone = trip.customer_phone
-            # Mismo motivo que la rama de "sin candidatos" arriba: un viaje
-            # del bot que se queda "solicitado" bloquea que ese número pueda
-            # pedir otro.
-            if customer_phone:
-                trip.status = TripStatus.CANCELADO
             await db.commit()
-            if customer_phone:
-                await send_whatsapp_message(
-                    customer_phone,
-                    "No encontramos un taxi disponible por ahora. Intenta de nuevo en unos minutos.",
-                )
     logger.info("Viaje %s: ningún candidato aceptó", trip_id)

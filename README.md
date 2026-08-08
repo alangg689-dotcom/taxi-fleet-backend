@@ -166,6 +166,7 @@ ofrece al más cercano ──PUBLISH──> Redis ──> WS /ws/driver del chof
         │  no contesta en DISPATCH_OFFER_TIMEOUT_SECONDS (default 25s) ─> siguiente candidato
         ▼
    se acaban los candidatos → la oferta queda vacía, el viaje sigue "solicitado"
+                              (si es del bot de WhatsApp, un barrido lo reintenta — ver abajo)
 ```
 
 Quién cuenta como candidato para un viaje (`find_candidate_drivers`): tiene un turno abierto en `vehicle_assignments` (alguien la está manejando ahora mismo), esa unidad mandó un ping de GPS dentro de `DISPATCH_POSITION_FRESHNESS_SECONDS` (default 5 min) y dentro de `DISPATCH_SEARCH_RADIUS_METERS` (default 5 km) del origen, y no tiene ya otro viaje activo.
@@ -190,18 +191,23 @@ Se usa el servicio de push de Expo (`https://exp.host/--/api/v2/push/send`) en v
 cliente escribe / comparte ubicación
         │
         ▼
-POST /whatsapp/webhook  ──Form (From, Latitude, Longitude)──> handle_incoming_message
+POST /whatsapp/webhook  ──Form (From, Body, Latitude, Longitude)──> handle_incoming_message
         │
+        ├─ "cancelar" ────────────────> cancela el viaje activo y libera la unidad (TwiML)
         ├─ sin ubicación ─────────────> responde pidiendo compartir ubicación (TwiML)
         ├─ ya tiene un viaje en curso ─> responde que espere (TwiML)
         └─ con ubicación ──────────────> crea Trip(customer_phone=From) + dispatch_trip() en background
                                           responde "buscando taxi…" (TwiML, inmediato)
                                                   │
                                      chofer acepta ──> WhatsApp al cliente: "unidad X va en camino"
-                                     nadie acepta / sin candidatos ──> WhatsApp al cliente avisando
+                                     nadie acepta / sin candidatos ──> se queda "solicitado", lo reintenta el barrido
 ```
 
-El estado de la conversación (`wa:conv:{phone}` → id del viaje activo) vive en Redis con una hora de TTL — es solo para saber si ya hay un viaje en curso para ese número, no un historial de chat. Un viaje se considera "ya no bloquea una solicitud nueva" si está completado/cancelado, o si quedó en "solicitado" más tiempo del que el motor de despacho tarda en agotar todos sus candidatos (`DISPATCH_OFFER_TIMEOUT_SECONDS × DISPATCH_MAX_CANDIDATES`) — cubre el caso de que nadie haya aceptado sin que el viaje se cancele explícitamente.
+**Un viaje del bot sin candidatos no se cancela.** Antes sí: `dispatch_trip` lo cancelaba en cuanto se rendía en la primera pasada, lo que le contestaba "no hay taxis" a alguien parado en la calle por una unidad que segundos después ya estaba libre. Ahora se queda en `solicitado` y `sweep_stuck_bot_trips` (`app.core.whatsapp_bot`, corre cada `BOT_TRIP_SWEEP_INTERVAL_SECONDS` desde el lifespan de `main.py`) lo vuelve a despachar mientras la flota cambia de disponibilidad. Solo se cancela —y ahí sí se le avisa al cliente— al llegar a `BOT_TRIP_MAX_WAIT_SECONDS` (20 min por default). El barrido salta los viajes con una oferta viva (`offer_expires_at` en el futuro) para no meterse a medio cascadeo de candidatos, y usa un lock en Redis (`wa:dispatch_retry:{trip_id}`, `SET NX`) para no relanzar `dispatch_trip` sobre un intento que sigue corriendo.
+
+El cliente puede escribir **`cancelar`** en cualquier momento: cancela el viaje, libera la unidad si ya tenía una asignada y limpia la conversación. Solo la palabra sola cuenta — un mensaje que la mencione de pasada ("no quiero cancelar, ¿cuánto falta?") no tumba el viaje.
+
+El estado de la conversación (`wa:conv:{phone}` → id del viaje activo) vive en Redis con una hora de TTL — es solo para saber si ya hay un viaje en curso para ese número, no un historial de chat. Un viaje "ya no bloquea una solicitud nueva" cuando está completado o cancelado, sin más: ya no hay criterio de edad, porque un `solicitado` viejo ahora significa que el barrido lo sigue reintentando (y es el propio barrido quien lo cancela si se agota la espera), no que quedó huérfano.
 
 Por ahora corre contra el **sandbox compartido de Twilio** (`TWILIO_WHATSAPP_FROM`, el número público `whatsapp:+14155238886`) — solo le contesta a números que se hayan unido al sandbox mandando el código que da Twilio. Pasar a un número de WhatsApp Business propio requiere aprobación de Meta y reemplazar ese número; también queda pendiente validar la firma `X-Twilio-Signature` del webhook (mientras se prueba en el sandbox compartido no hay nada sensible que proteger todavía).
 
