@@ -28,6 +28,22 @@ def generate_token() -> str:
     return secrets.token_urlsafe(48)
 
 
+def generate_pin(length: int = 6) -> str:
+    """PIN numérico para el login del chofer — secrets.randbelow (no
+    random.randint, que no es criptográficamente seguro).
+
+    A diferencia de generate_token(), un PIN de 6 dígitos tiene poca
+    entropía (10^6 combinaciones) — se guarda con hash_token igual que
+    pidió el negocio, pero eso es SHA-256 sin sal, pensado para secretos de
+    alta entropía (ver su docstring). Con la base comprometida, un PIN así
+    es reversible con una tabla precalculada en segundos; lo que sí lo
+    protege es login_throttle (5 intentos y bloqueo) contra fuerza bruta
+    en línea, que es el vector real mientras el PIN no se filtre de la
+    base directamente.
+    """
+    return "".join(str(secrets.randbelow(10)) for _ in range(length))
+
+
 def hash_token(token: str) -> str:
     """SHA-256 para tokens de alta rotación.
 

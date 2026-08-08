@@ -35,3 +35,10 @@ class DriverOut(BaseModel):
     license_number: str
     status: DriverStatus
     is_active: bool
+
+
+class DriverCreated(DriverOut):
+    """El PIN se muestra UNA sola vez, al dar de alta al chofer o al
+    regenerarlo (POST /drivers/{id}/pin). Después solo queda su hash."""
+
+    pin: str

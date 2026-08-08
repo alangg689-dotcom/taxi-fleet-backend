@@ -3,13 +3,9 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
-class OTPRequest(BaseModel):
+class DriverLoginRequest(BaseModel):
     phone: str = Field(..., min_length=10, max_length=20, examples=["+525512345678"])
-
-
-class OTPVerify(BaseModel):
-    phone: str = Field(..., min_length=10, max_length=20)
-    code: str = Field(..., min_length=4, max_length=8)
+    pin: str = Field(..., min_length=4, max_length=8)
     device_info: str | None = Field(None, max_length=255, examples=["Pixel 7 / Android 14"])
 
 

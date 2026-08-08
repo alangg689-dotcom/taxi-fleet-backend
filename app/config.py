@@ -29,15 +29,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_MINUTES: int = 15
     REFRESH_TOKEN_DAYS: int = 30
 
-    # --- OTP ---
-    OTP_LENGTH: int = 6
-    OTP_TTL_SECONDS: int = 300           # 5 minutos de vigencia
-    OTP_MAX_REQUESTS: int = 3            # máx. solicitudes por ventana
-    OTP_REQUEST_WINDOW: int = 900        # ventana de 15 minutos
-    OTP_MAX_ATTEMPTS: int = 5            # fallos antes de bloquear
-    OTP_LOCKOUT_SECONDS: int = 1800      # bloqueo de 30 minutos
-
-    # --- Login (operadores/admin) ---
+    # --- Login (throttle compartido: email de operador/admin o teléfono de chofer) ---
     LOGIN_MAX_ATTEMPTS: int = 5          # fallos antes de bloquear
     LOGIN_ATTEMPT_WINDOW: int = 900      # ventana de 15 minutos para contar fallos
     LOGIN_LOCKOUT_SECONDS: int = 1800    # bloqueo de 30 minutos
@@ -47,13 +39,11 @@ class Settings(BaseSettings):
     LOCATION_CHANNEL: str = "fleet:updates"   # canal Redis pub/sub
     LAST_POSITION_TTL: int = 3600        # TTL de la última posición en cache
 
-    # --- SMS ---
-    SMS_PROVIDER: str = "console"        # "console" en dev, "twilio" en prod
+    # --- Bot de WhatsApp (Twilio) ---
+    # El login de chofer ya no usa Twilio (ver spec de PIN, app.api.auth) —
+    # estas credenciales quedan solo para el bot de WhatsApp de clientes.
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_FROM_NUMBER: str = ""
-
-    # --- Bot de WhatsApp (Twilio) ---
     # Número compartido del sandbox de Twilio por default — el mismo para
     # cualquier cuenta mientras se prueba. Al pasar a un perfil de WhatsApp
     # Business propio, se reemplaza por el número real aprobado por Meta.

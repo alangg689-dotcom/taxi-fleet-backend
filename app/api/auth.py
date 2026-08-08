@@ -1,13 +1,15 @@
 """Endpoints de autenticación.
 
 Dos caminos según el rol:
-  - Choferes: teléfono + OTP por SMS (sin contraseñas que memorizar en campo).
+  - Choferes: teléfono + PIN, asignado por el operador (sin Twilio, sin
+    contraseñas que memorizar en campo).
   - Operadores/admin: email + contraseña desde el dashboard web.
 
 Ambos terminan emitiendo el mismo par access/refresh token.
 """
 
 import logging
+import secrets
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core import login_throttle, otp as otp_service
+from app.core import login_throttle
 from app.core.deps import get_current_user
 from app.core.security import (
     create_access_token,
@@ -25,12 +27,11 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
-from app.models import RefreshToken, User, UserRole
+from app.models import Driver, RefreshToken, User, UserRole
 from app.schemas.auth import (
+    DriverLoginRequest,
     LoginRequest,
     MessageResponse,
-    OTPRequest,
-    OTPVerify,
     RefreshRequest,
     TokenPair,
 )
@@ -63,51 +64,40 @@ async def _issue_token_pair(
     )
 
 
-# --- Flujo OTP (choferes) -----------------------------------------------------
+# --- Login con PIN (choferes) --------------------------------------------------
 
-@router.post("/otp/request", response_model=MessageResponse)
-async def request_otp(payload: OTPRequest, db: AsyncSession = Depends(get_db)):
-    """Paso 1: el chofer pide un código.
-
-    Se responde igual exista o no el teléfono, para no revelar qué números
-    están dados de alta en el sistema.
-    """
-    result = await db.execute(select(User).where(User.phone == payload.phone))
-    user = result.scalar_one_or_none()
-
-    if user is not None and user.is_active:
-        try:
-            code = await otp_service.request_otp(payload.phone)
-        except otp_service.OTPError as exc:
-            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
-
-        try:
-            await otp_service.send_sms(payload.phone, code)
-        except otp_service.SMSDeliveryError:
-            # No se refleja al cliente: distinguir "SMS falló" de "teléfono no
-            # registrado" sería el mismo hueco de enumeración que este endpoint
-            # evita respondiendo siempre el mismo mensaje genérico.
-            logger.error("Falló el envío de OTP a %s", payload.phone, exc_info=True)
-
-    return MessageResponse(detail="Si el número está registrado, recibirás un código.")
-
-
-@router.post("/otp/verify", response_model=TokenPair)
-async def verify_otp(payload: OTPVerify, db: AsyncSession = Depends(get_db)):
-    """Paso 2: el chofer envía el código y recibe sus tokens."""
+@router.post("/driver-login", response_model=TokenPair)
+async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Teléfono + PIN — el PIN lo asigna el operador (POST /drivers o
+    POST /drivers/{id}/pin), no lo elige el chofer. Un solo paso, a
+    diferencia del OTP anterior: no hay nada que enumerar aparte con un
+    segundo endpoint, así que el throttle y el mensaje genérico de error
+    (igual sea teléfono inexistente, sin PIN asignado, o PIN incorrecto)
+    bastan, mismo patrón que /auth/login."""
     try:
-        valid = await otp_service.verify_otp(payload.phone, payload.code)
-    except otp_service.OTPError as exc:
+        await login_throttle.check_not_locked(payload.phone)
+    except login_throttle.LoginLockedError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
 
-    if not valid:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Código incorrecto")
-
     result = await db.execute(select(User).where(User.phone == payload.phone))
     user = result.scalar_one_or_none()
-    if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario no encontrado")
 
+    driver = None
+    if user is not None:
+        driver_result = await db.execute(select(Driver).where(Driver.user_id == user.id))
+        driver = driver_result.scalar_one_or_none()
+
+    if (
+        user is None
+        or driver is None
+        or driver.pin_hash is None
+        or not secrets.compare_digest(driver.pin_hash, hash_token(payload.pin))
+        or not user.is_active
+    ):
+        await login_throttle.record_failure(payload.phone)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
+
+    await login_throttle.reset(payload.phone)
     return await _issue_token_pair(db, user, payload.device_info)
 
 
@@ -138,7 +128,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     if user.role == UserRole.DRIVER:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Los choferes ingresan con teléfono y código"
+            status.HTTP_403_FORBIDDEN, "Los choferes ingresan con teléfono y PIN"
         )
 
     return await _issue_token_pair(db, user, payload.device_info)
