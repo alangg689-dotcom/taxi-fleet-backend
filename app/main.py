@@ -9,12 +9,27 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, drivers, location, trips, vehicles, whatsapp
+from app.api import auth, drivers, location, stands, trips, vehicles, whatsapp
 from app.config import settings
 from app.core.redis_client import redis_client
+from app.core.stands import sweep_stand_queues
 from app.ws import fleet
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+async def _stand_queue_sweep_loop() -> None:
+    """Dispara sweep_stand_queues cada STAND_SWEEP_INTERVAL_SECONDS — lo que
+    no depende de que llegue un ping nuevo (pérdida de señal, cronómetros de
+    candidato que ya cumplieron su tiempo). Ver app.core.stands, sección 7
+    de spec-sitios-y-fila-v2.md."""
+    while True:
+        try:
+            await sweep_stand_queues()
+        except Exception:
+            logger.exception("Error en el barrido de sitios/fila")
+        await asyncio.sleep(settings.STAND_SWEEP_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
@@ -22,10 +37,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # El listener de Redis debe vivir tanto como la aplicación: es lo que
     # conecta los pings entrantes con los dashboards de esta instancia.
     listener = asyncio.create_task(fleet.redis_listener())
+    sweep = asyncio.create_task(_stand_queue_sweep_loop())
     yield
-    listener.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await listener
+    for task in (listener, sweep):
+        task.cancel()
+    for task in (listener, sweep):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     await redis_client.aclose()
 
 
@@ -60,6 +78,7 @@ app.include_router(auth.router, prefix="/api/v1")
 # "nearby" como un UUID.
 app.include_router(location.router, prefix="/api/v1")
 app.include_router(vehicles.router, prefix="/api/v1")
+app.include_router(stands.router, prefix="/api/v1")
 app.include_router(trips.router, prefix="/api/v1")
 app.include_router(drivers.router, prefix="/api/v1")
 app.include_router(whatsapp.router, prefix="/api/v1")

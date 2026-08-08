@@ -5,6 +5,7 @@ segundos son ~10-20 escrituras por segundo en régimen normal, más las ráfagas
 de los buffers offline.
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 
@@ -22,6 +23,7 @@ from app.core.redis_client import (
     publish_location_update,
     set_last_position,
 )
+from app.core.stands import run_queue_evaluation_batch
 from app.database import get_db
 from app.models import LocationPing, User, UserRole, Vehicle
 from app.schemas.location import (
@@ -56,10 +58,14 @@ async def _persist_pings(
     hay que confiar en un punto ya descartado.
 
     Esto no afecta el despacho ni el mapa en vivo (siguen leyendo el cache
-    de Redis tal cual, ver _broadcast_latest) — es exclusivo de la fila de
-    sitios, que todavía no existe."""
+    de Redis tal cual, ver _broadcast_latest). Los pings elegibles sí
+    alimentan la máquina de estados de la fila de sitios (app.core.stands,
+    sección 7 de la spec) — en una asyncio.create_task aparte para no
+    meter esa evaluación (que hace sus propias consultas geoespaciales) en
+    el camino caliente de esta función."""
     previous = await get_last_position(str(vehicle_id))
     rows = []
+    eligible_pings: list[LocationPingIn] = []
     for p in pings:
         validation = await validate_ping(str(vehicle_id), p, previous)
         rows.append(
@@ -77,11 +83,16 @@ async def _persist_pings(
         )
         if validation.queue_eligible:
             previous = {"lat": p.lat, "lng": p.lng, "timestamp": p.timestamp.isoformat()}
+            eligible_pings.append(p)
 
     stmt = pg_insert(LocationPing).values(rows).on_conflict_do_nothing(
         constraint="uq_ping_vehicle_time"
     )
     result = await db.execute(stmt)
+
+    if eligible_pings:
+        asyncio.create_task(run_queue_evaluation_batch(vehicle_id, eligible_pings))
+
     return result.rowcount or 0
 
 

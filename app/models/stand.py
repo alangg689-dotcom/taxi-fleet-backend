@@ -58,6 +58,12 @@ class Stand(Base):
     max_speed_kmh: Mapped[float] = mapped_column(Float, default=5.0)
     polygon_buffer_meters: Mapped[int] = mapped_column(Integer, default=15)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # True para los 6 sitios sembrados por la migración 0008 con un cuadro
+    # de referencia, sin polígono real trazado. PATCH /stands/{id} debe
+    # apagarla en cuanto un operador trace el polígono de verdad — sirve
+    # para que el dashboard los marque distinto y nadie los confunda con
+    # sitios reales en unas semanas.
+    is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
