@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _broadcast_latest, _persist_pings
 from app.config import settings
+from app.core import ping_throttle
 from app.core.redis_client import driver_offer_channel, get_all_last_positions, redis_client
 from app.core.security import decode_access_token, hash_token
 from app.database import get_db
@@ -292,6 +293,39 @@ async def driver_socket(
             except (json.JSONDecodeError, ValidationError, TypeError) as exc:
                 await websocket.send_text(
                     json.dumps({"type": "error", "detail": str(exc)})
+                )
+                continue
+
+            # El tope de lote aquí es explícito: este camino arma los
+            # LocationPingIn a mano y NO pasa por LocationBatchIn, que es
+            # donde vive el límite del endpoint REST — sin esto, un solo
+            # frame podría traer un lote sin cota.
+            if len(pings) > settings.LOCATION_BATCH_MAX:
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "error",
+                        "detail": (
+                            f"Máximo {settings.LOCATION_BATCH_MAX} pings por mensaje. "
+                            "Divide el buffer."
+                        ),
+                    })
+                )
+                continue
+
+            try:
+                await ping_throttle.check_and_count(str(vehicle.id), len(pings))
+            except ping_throttle.PingRateLimitExceeded as exc:
+                # No se cierra la conexión: la app debe poder seguir
+                # recibiendo ofertas de viaje aunque su telemetría venga
+                # excedida, y al vencer la ventana se reanuda sola. Sin
+                # "ack", así que el buffer local NO se borra (ver abajo) y
+                # esos pings se reintentan después.
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "error",
+                        "detail": str(exc),
+                        "retry_after": exc.retry_after,
+                    })
                 )
                 continue
 

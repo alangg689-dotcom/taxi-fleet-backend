@@ -22,23 +22,32 @@ redis_client: aioredis.Redis = aioredis.from_url(
 
 # --- Contadores atómicos --------------------------------------------------
 
-# INCR + EXPIRE en una sola operación indivisible. El TTL se fija solo en el
+# INCRBY + EXPIRE en una sola operación indivisible. El TTL se fija solo en el
 # primer incremento, para que la ventana sea fija y no se renueve con cada
 # intento. Sin esto, dos intentos casi simultáneos podrían leer el mismo
 # valor antes de que cualquiera lo escribiera y dejar pasar más de la cuenta.
 _INCR_WITH_TTL = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
+local current = redis.call('INCRBY', KEYS[1], ARGV[2])
+if current == tonumber(ARGV[2]) then
     redis.call('EXPIRE', KEYS[1], ARGV[1])
 end
 return current
 """
 
 
-async def incr_with_ttl(key: str, ttl: int) -> int:
-    """Incrementa `key` atómicamente; usado por app.core.login_throttle
-    (login de operador/admin y de chofer, mismo módulo para ambos)."""
-    return int(await redis_client.eval(_INCR_WITH_TTL, 1, key, ttl))
+async def incr_with_ttl(key: str, ttl: int, amount: int = 1) -> int:
+    """Incrementa `key` atómicamente y devuelve el total de la ventana.
+
+    `amount` existe para el limitador de telemetría (app.core.ping_throttle):
+    ahí lo que se cuenta son PINGS, no peticiones — una sola petición puede
+    traer hasta LOCATION_BATCH_MAX de golpe al vaciarse un buffer offline, y
+    contarla como 1 dejaría pasar cien veces el presupuesto real. El default
+    de 1 conserva el comportamiento que ya usaba app.core.login_throttle.
+
+    La condición del TTL compara contra `amount` (no contra 1) justamente
+    porque el primer incremento de una ventana puede valer más de uno.
+    """
+    return int(await redis_client.eval(_INCR_WITH_TTL, 1, key, ttl, amount))
 
 
 # --- Cache de última posición -------------------------------------------------

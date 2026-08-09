@@ -35,8 +35,38 @@ async def _sweep_loop(
         await asyncio.sleep(interval_seconds)
 
 
+def _warn_on_insecure_config() -> None:
+    """Avisa fuerte al arrancar si quedó puesta una config que solo debería
+    existir en desarrollo.
+
+    CORS_ORIGINS="*" no es una puerta abierta a la sesión de nadie —
+    la auth viaja en el header Authorization, no en cookies, y con
+    allow_credentials=False el navegador no la manda sola desde otro
+    origen. Pero sí deja que cualquier página sondee la API desde un
+    navegador, y deja de ser inofensivo el día que algo pase a usar
+    cookies. Como cerrarlo requiere saber el dominio real del dashboard,
+    esto no lo cierra solo: lo hace imposible de ignorar en el arranque.
+    """
+    if settings.DEBUG:
+        return
+    if settings.cors_origins == ["*"]:
+        logger.warning(
+            "CORS_ORIGINS=* con DEBUG=false — cualquier origen puede llamar a "
+            "esta API desde un navegador. Pon el dominio real del dashboard "
+            "en CORS_ORIGINS antes de exponer esto a internet."
+        )
+    if settings.JWT_SECRET == "CAMBIAR-EN-PRODUCCION":
+        logger.warning(
+            "JWT_SECRET sigue con el valor de ejemplo — cualquiera que lea el "
+            "repositorio puede firmar tokens válidos. Genera uno con "
+            "'openssl rand -hex 32'."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    _warn_on_insecure_config()
+
     # El listener de Redis debe vivir tanto como la aplicación: es lo que
     # conecta los pings entrantes con los dashboards de esta instancia.
     tasks = [
