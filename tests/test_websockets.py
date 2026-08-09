@@ -20,6 +20,8 @@ import pytest
 from httpx_ws import WebSocketDisconnect, aconnect_ws
 from sqlalchemy import select
 
+from app.config import settings
+from app.core import ping_throttle
 from app.core.redis_client import get_last_position, publish_trip_offer
 from app.models import LocationPing, UserRole, VehicleStatus
 from app.ws import fleet as fleet_module
@@ -183,6 +185,52 @@ async def test_driver_socket_reports_malformed_ping_without_closing(
             await ws.send_json(_ping())
             ack = await ws.receive_json()
             assert ack["type"] == "ack"
+
+
+async def test_driver_socket_rejects_oversized_batch(ws_client_factory, db_session):
+    """Este camino arma los LocationPingIn a mano y no pasa por
+    LocationBatchIn, donde vive el tope del endpoint REST — sin el chequeo
+    explícito en el socket, un frame podría traer un lote sin cota."""
+    _, device_key = await make_vehicle(db_session, with_device_key=True)
+    oversized = [
+        _ping(timestamp=(datetime.now(UTC) - timedelta(seconds=i)).isoformat())
+        for i in range(settings.LOCATION_BATCH_MAX + 1)
+    ]
+
+    async with ws_client_factory() as ws_client:
+        async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
+            await ws.send_json(oversized)
+            error = await ws.receive_json()
+            assert error["type"] == "error"
+            assert str(settings.LOCATION_BATCH_MAX) in error["detail"]
+
+            # No cierra la conexión: un lote de tamaño normal sigue entrando.
+            await ws.send_json(_ping())
+            assert (await ws.receive_json())["type"] == "ack"
+
+
+async def test_driver_socket_reports_rate_limit_without_closing(
+    ws_client_factory, db_session
+):
+    """El techo de telemetría corta el ping pero NO la conexión: la app
+    debe poder seguir recibiendo ofertas de viaje, y al no llegar "ack" su
+    buffer local conserva esos pings para reintentarlos."""
+    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+    await ping_throttle.check_and_count(str(vehicle.id), settings.PING_MAX_PER_WINDOW)
+
+    async with ws_client_factory() as ws_client:
+        async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # connected
+            await ws.send_json(_ping())
+            error = await ws.receive_json()
+            assert error["type"] == "error"
+            assert error["retry_after"] > 0
+
+            # La conexión sigue viva: al liberar el techo, vuelve a aceptar.
+            await ping_throttle.reset(str(vehicle.id))
+            await ws.send_json(_ping())
+            assert (await ws.receive_json())["type"] == "ack"
 
 
 # --- Puente Redis Pub/Sub entre ambos sockets -------------------------------

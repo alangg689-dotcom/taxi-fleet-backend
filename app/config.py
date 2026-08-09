@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     LOCATION_BATCH_MAX: int = 100        # máx. pings por lote (buffer offline)
     LOCATION_CHANNEL: str = "fleet:updates"   # canal Redis pub/sub
     LAST_POSITION_TTL: int = 3600        # TTL de la última posición en cache
+    # Techo de pings por unidad y ventana (app.core.ping_throttle). El
+    # device_key es una credencial fija que vive en el teléfono y no expira:
+    # si se filtra, esto acota el daño. Holgado a propósito — la cadencia
+    # normal es 3s dentro de un sitio (20/min) y 15s fuera (4/min), pero al
+    # recuperar señal la app vacía su buffer en lotes de LOCATION_BATCH_MAX,
+    # y un apagón de dos horas son ~480 pings acumulados que deben entrar sin
+    # perderse. 600/min deja pasar eso y aun así corta un flood real, que
+    # serían miles por segundo.
+    PING_MAX_PER_WINDOW: int = 600
+    PING_WINDOW_SECONDS: int = 60
 
     # --- Bot de WhatsApp (Twilio) ---
     # El login de chofer ya no usa Twilio (ver spec de PIN, app.api.auth) —

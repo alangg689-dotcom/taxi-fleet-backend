@@ -15,6 +15,7 @@ from sqlalchemy import cast, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import ping_throttle
 from app.core.deps import get_vehicle_by_device_key, require_roles
 from app.core.ping_validation import validate_ping
 from app.core.redis_client import (
@@ -145,6 +146,15 @@ async def ingest_pings(
     captura, porque el mapa únicamente necesita la posición actual — el resto
     ya quedó guardado para el historial de rutas.
     """
+    try:
+        await ping_throttle.check_and_count(str(vehicle.id), len(payload.pings))
+    except ping_throttle.PingRateLimitExceeded as exc:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+
     ordered = sorted(payload.pings, key=lambda p: p.timestamp)
     accepted = await _persist_pings(db, vehicle.id, ordered)
     await _broadcast_latest(vehicle, ordered[-1])
