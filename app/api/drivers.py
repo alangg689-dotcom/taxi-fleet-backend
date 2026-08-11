@@ -11,13 +11,13 @@ chofer elija en la app.
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_roles
 from app.core.security import generate_pin, hash_token
 from app.database import get_db
-from app.models import Driver, User, UserRole
+from app.models import Driver, User, UserRole, Vehicle, VehicleAssignment
 from app.schemas.driver import DriverCreate, DriverCreated, DriverOut, DriverUpdate, PushTokenUpdate
 
 router = APIRouter(prefix="/drivers", tags=["choferes"])
@@ -34,17 +34,35 @@ def _driver_query():
     salga en ninguna respuesta salvo el PIN en claro, una sola vez, al
     darlo de alta o regenerarlo; has_pin sí (derivado, no el hash) para que
     el dashboard pueda distinguir a quién todavía le falta asignárselo —
-    los migrados del login por OTP nacieron con pin_hash NULL."""
-    return select(
-        Driver.id,
-        Driver.user_id,
-        User.phone,
-        Driver.full_name,
-        Driver.license_number,
-        Driver.status,
-        User.is_active,
-        Driver.pin_hash.isnot(None).label("has_pin"),
-    ).join(User, User.id == Driver.user_id)
+    los migrados del login por OTP nacieron con pin_hash NULL.
+
+    La unidad del turno abierto va por LEFT JOIN: sin ella el dashboard no
+    puede saber a quién ofrecer al asignar una unidad (un chofer con turno
+    abierto ya está manejando otra) ni mostrar en qué anda cada uno."""
+    return (
+        select(
+            Driver.id,
+            Driver.user_id,
+            User.phone,
+            Driver.full_name,
+            Driver.license_number,
+            Driver.numeral,
+            Driver.status,
+            User.is_active,
+            Driver.pin_hash.isnot(None).label("has_pin"),
+            Vehicle.id.label("current_vehicle_id"),
+            Vehicle.plate.label("current_vehicle_plate"),
+        )
+        .join(User, User.id == Driver.user_id)
+        .outerjoin(
+            VehicleAssignment,
+            and_(
+                VehicleAssignment.driver_id == Driver.id,
+                VehicleAssignment.ended_at.is_(None),
+            ),
+        )
+        .outerjoin(Vehicle, Vehicle.id == VehicleAssignment.vehicle_id)
+    )
 
 
 async def _get_driver_or_404(db: AsyncSession, driver_id: uuid.UUID) -> Driver:
@@ -52,6 +70,21 @@ async def _get_driver_or_404(db: AsyncSession, driver_id: uuid.UUID) -> Driver:
     if driver is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chofer no encontrado")
     return driver
+
+
+async def _reject_numeral_taken(
+    db: AsyncSession, numeral: str, exclude_id: uuid.UUID | None = None
+) -> None:
+    """El índice único de la 0011 ya lo impide en la base, pero ahí saldría
+    como un 500 sin explicación. Esto lo convierte en un 409 que el
+    dashboard puede mostrarle al operador."""
+    query = select(Driver).where(Driver.numeral == numeral)
+    if exclude_id is not None:
+        query = query.where(Driver.id != exclude_id)
+    if (await db.execute(query)).scalar_one_or_none() is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"El numeral {numeral} ya lo tiene otro chofer"
+        )
 
 
 @router.post("", response_model=DriverCreated, status_code=status.HTTP_201_CREATED)
@@ -76,6 +109,8 @@ async def create_driver(
     if license_taken.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Ya existe un chofer con esa licencia")
 
+    await _reject_numeral_taken(db, payload.numeral)
+
     user = User(phone=payload.phone, role=UserRole.DRIVER)
     db.add(user)
     await db.flush()
@@ -85,6 +120,7 @@ async def create_driver(
         user_id=user.id,
         full_name=payload.full_name,
         license_number=payload.license_number,
+        numeral=payload.numeral,
         pin_hash=hash_token(pin),
     )
     db.add(driver)
@@ -172,7 +208,11 @@ async def update_driver(
 ):
     driver = await _get_driver_or_404(db, driver_id)
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if updates.get("numeral") is not None:
+        await _reject_numeral_taken(db, updates["numeral"], exclude_id=driver_id)
+
+    for field, value in updates.items():
         setattr(driver, field, value)
 
     result = await db.execute(_driver_query().where(Driver.id == driver_id))

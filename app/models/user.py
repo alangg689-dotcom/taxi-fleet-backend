@@ -4,7 +4,7 @@ son los perfiles operativos que cuelgan de ella."""
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -49,6 +49,12 @@ class Driver(Base):
     )
     full_name: Mapped[str] = mapped_column(String(150))
     license_number: Mapped[str] = mapped_column(String(50), unique=True)
+    # Numeral de radio (R18, R20…): con esto lo nombra la operadora, no con
+    # la placa de la unidad — el chofer puede cambiar de unidad y su numeral
+    # lo sigue. Es lo que se pinta en el mapa de flota.
+    # Nulo para los que se dieron de alta antes de la migración 0011; un
+    # operador se los asigna con PATCH /drivers/{id}.
+    numeral: Mapped[str | None] = mapped_column(String(10))
     status: Mapped[DriverStatus] = mapped_column(
         Enum(DriverStatus, name="driver_status", values_callable=lambda e: [m.value for m in e]),
         default=DriverStatus.ACTIVO,
@@ -67,6 +73,18 @@ class Driver(Base):
     user: Mapped["User"] = relationship(back_populates="driver")
     assignments: Mapped[list["VehicleAssignment"]] = relationship(
         back_populates="driver"
+    )
+
+    __table_args__ = (
+        # Parcial a propósito: el numeral es único entre los que sí lo tienen,
+        # pero los migrados de antes de la 0011 están todos en NULL y no
+        # deben chocar entre sí. Ver la migración 0011.
+        Index(
+            "ix_drivers_numeral",
+            "numeral",
+            unique=True,
+            postgresql_where=text("numeral IS NOT NULL"),
+        ),
     )
 
 

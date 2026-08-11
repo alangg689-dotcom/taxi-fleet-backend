@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import require_roles
@@ -31,6 +31,31 @@ admin_only = require_roles(UserRole.ADMIN)
 driver_or_staff = require_roles(UserRole.DRIVER, UserRole.OPERATOR, UserRole.ADMIN)
 
 
+def _vehicle_with_driver_query():
+    """Vehículo + el chofer de su turno abierto, si lo hay.
+
+    LEFT JOIN a propósito en los dos saltos: una unidad sin turno abierto
+    (nadie la trae) sigue siendo una unidad válida que el mapa debe pintar,
+    solo que rotulada con su placa en vez del numeral."""
+    return (
+        select(Vehicle, Driver.numeral, Driver.full_name)
+        .outerjoin(
+            VehicleAssignment,
+            and_(
+                VehicleAssignment.vehicle_id == Vehicle.id,
+                VehicleAssignment.ended_at.is_(None),
+            ),
+        )
+        .outerjoin(Driver, Driver.id == VehicleAssignment.driver_id)
+    )
+
+
+def _to_vehicle_out(vehicle: Vehicle, numeral: str | None, name: str | None) -> VehicleOut:
+    return VehicleOut.model_validate(vehicle).model_copy(
+        update={"driver_numeral": numeral, "driver_name": name}
+    )
+
+
 @router.get("", response_model=list[VehicleOut])
 async def list_vehicles(
     response: Response,
@@ -46,9 +71,9 @@ async def list_vehicles(
     response.headers["X-Total-Count"] = str(total)
 
     result = await db.execute(
-        select(Vehicle).order_by(Vehicle.plate).limit(limit).offset(offset)
+        _vehicle_with_driver_query().order_by(Vehicle.plate).limit(limit).offset(offset)
     )
-    return list(result.scalars().all())
+    return [_to_vehicle_out(*row) for row in result.all()]
 
 
 @router.get("/{vehicle_id}", response_model=VehicleOut)
@@ -57,10 +82,10 @@ async def get_vehicle(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
-    vehicle = await db.get(Vehicle, vehicle_id)
-    if vehicle is None:
+    row = (await db.execute(_vehicle_with_driver_query().where(Vehicle.id == vehicle_id))).first()
+    if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
-    return vehicle
+    return _to_vehicle_out(*row)
 
 
 @router.get("/{vehicle_id}/queue-position", response_model=QueuePositionOut | None)
@@ -150,7 +175,12 @@ async def update_vehicle(
 
     for field, value in updates.items():
         setattr(vehicle, field, value)
-    return vehicle
+
+    # Se relee para traer el chofer del turno abierto: devolver el objeto
+    # mutado dejaría driver_numeral en null, que significa "esta unidad no
+    # trae chofer" y no "aquí no lo consulté".
+    row = (await db.execute(_vehicle_with_driver_query().where(Vehicle.id == vehicle_id))).first()
+    return _to_vehicle_out(*row)
 
 
 @router.post("/{vehicle_id}/device-key", response_model=VehicleCreated)
@@ -218,7 +248,9 @@ async def set_vehicle_status(
     # accept/complete/cancel llevan su propio aviso (ver _set_vehicle_status
     # en app.api.trips).
     await publish_vehicle_status_update(str(vehicle.id), vehicle.status.value, on_trip=False)
-    return vehicle
+
+    row = (await db.execute(_vehicle_with_driver_query().where(Vehicle.id == vehicle_id))).first()
+    return _to_vehicle_out(*row)
 
 
 # --- Asignaciones de turno ----------------------------------------------------
@@ -234,8 +266,11 @@ async def open_assignment(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
-    """Abre un turno. Cierra automáticamente el turno anterior de esa unidad,
-    de modo que nunca haya dos choferes activos en el mismo vehículo."""
+    """Abre un turno. Cierra automáticamente el turno anterior de esa unidad
+    y cualquier turno que el chofer traiga abierto en otra, de modo que
+    nunca haya dos choferes activos en el mismo vehículo ni un chofer
+    activo en dos unidades — lo segundo dejaría ambiguo su
+    current_vehicle en GET /drivers y duplicaría su fila."""
     vehicle = await db.get(Vehicle, vehicle_id)
     if vehicle is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
@@ -247,8 +282,11 @@ async def open_assignment(
     now = datetime.now(UTC)
     open_shifts = await db.execute(
         select(VehicleAssignment).where(
-            VehicleAssignment.vehicle_id == vehicle_id,
             VehicleAssignment.ended_at.is_(None),
+            or_(
+                VehicleAssignment.vehicle_id == vehicle_id,
+                VehicleAssignment.driver_id == payload.driver_id,
+            ),
         )
     )
     for shift in open_shifts.scalars().all():

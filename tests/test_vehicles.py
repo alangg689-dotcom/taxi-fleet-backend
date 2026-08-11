@@ -30,6 +30,37 @@ async def test_admin_can_create_vehicle(client, db_session):
     assert "device_key" in body
 
 
+async def test_vehicle_carries_numeral_of_driver_on_shift(client, db_session):
+    """El mapa de flota rotula con el numeral del chofer que trae la unidad,
+    no con la placa — sale del turno abierto, no de un campo del vehículo."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    stand = await make_stand(db_session)
+    vehicle = await make_vehicle(db_session, stand_id=stand.id)
+    driver, _ = await make_driver(db_session, numeral="R18")
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+
+    response = await client.get(
+        f"/api/v1/vehicles/{vehicle.id}", headers=auth_headers(operator_token)
+    )
+    assert response.status_code == 200
+    assert response.json()["driver_numeral"] == "R18"
+    assert response.json()["driver_name"] == "Chofer de prueba"
+
+
+async def test_vehicle_without_open_shift_has_no_numeral(client, db_session):
+    """Sin turno abierto no hay chofer del que sacar el numeral: el mapa cae
+    de vuelta a la placa. Nulo, no error."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    stand = await make_stand(db_session)
+    vehicle = await make_vehicle(db_session, stand_id=stand.id)
+
+    listed = await client.get("/api/v1/vehicles", headers=auth_headers(operator_token))
+    assert listed.status_code == 200
+    row = next(v for v in listed.json() if v["id"] == str(vehicle.id))
+    assert row["driver_numeral"] is None
+    assert row["driver_name"] is None
+
+
 async def test_create_vehicle_unknown_stand_is_404(client, db_session):
     _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
 

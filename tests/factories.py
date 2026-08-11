@@ -64,6 +64,7 @@ async def make_driver(
     *,
     phone: str | None = None,
     license_number: str | None = None,
+    numeral: str | None = None,
     with_pin: bool = False,
 ) -> tuple[Driver, str]:
     """Crea un chofer (User + Driver).
@@ -77,6 +78,12 @@ async def make_driver(
     así que sin with_pin ese chofer no podría entrar por ese endpoint."""
     phone = phone or f"+5255{uuid.uuid4().int % 10**8:08d}"
     license_number = license_number or f"LIC-{uuid.uuid4().hex[:10]}"
+    # Único por chofer: el índice de la 0011 es parcial pero sigue siendo
+    # único, y dos factories con el mismo numeral reventarían la prueba con
+    # un IntegrityError que no tiene nada que ver con lo que se está
+    # probando. Para el caso legítimo de un chofer sin numeral (previo a la
+    # 0011) hay que ponerlo en None a mano sobre el modelo.
+    numeral = numeral or f"R{uuid.uuid4().int % 10000:04d}"
 
     user = User(phone=phone, role=UserRole.DRIVER)
     db.add(user)
@@ -87,6 +94,7 @@ async def make_driver(
         user_id=user.id,
         full_name="Chofer de prueba",
         license_number=license_number,
+        numeral=numeral,
         status=DriverStatus.ACTIVO,
         pin_hash=hash_token(pin) if pin else None,
     )

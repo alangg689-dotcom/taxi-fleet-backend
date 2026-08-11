@@ -45,6 +45,12 @@ class VehicleOut(BaseModel):
     year: int | None
     status: VehicleStatus
     stand_id: UUID
+    # Del chofer del turno abierto (vehicle_assignments.ended_at IS NULL).
+    # Nulos si la unidad no trae turno abierto, o si ese chofer es anterior a
+    # la migración 0011 y todavía no tiene numeral. El mapa de flota rotula
+    # con el numeral y cae de vuelta a la placa cuando viene nulo.
+    driver_numeral: str | None = None
+    driver_name: str | None = None
 
 
 class VehicleCreated(VehicleOut):

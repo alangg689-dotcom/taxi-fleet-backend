@@ -21,24 +21,33 @@ def _validate_polygon_geojson(v: dict | None) -> dict | None:
 
 
 class StandOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    """Lo mínimo para listas y selectores. Trae el centro porque el mapa de
+    flota necesita saber dónde opera la flotilla para encuadrar mientras
+    ninguna unidad reporta posición, y pedir el detalle de los 6 sitios solo
+    para eso serían 6 llamadas."""
+
+    model_config = ConfigDict(from_attributes=False)
 
     id: UUID
     name: str
     active: bool
     is_placeholder: bool
+    center_lat: float
+    center_lng: float
 
 
 class StandDetail(StandOut):
-    """A diferencia de StandOut, no sale de un simple `from_attributes`: la
-    geometría (Geography) se proyecta a GeoJSON/lat-lng en la propia
-    consulta SQL, igual que el resto de las columnas espaciales del repo."""
+    """A diferencia de StandOut, trae la geometría completa. Ninguno de los
+    dos sale de un simple `from_attributes`: la geometría (Geography) se
+    proyecta a GeoJSON/lat-lng en la propia consulta SQL, igual que el resto
+    de las columnas espaciales del repo."""
 
-    model_config = ConfigDict(from_attributes=False)
-
-    center_lat: float
-    center_lng: float
     polygon_geojson: dict
+    # El trazo del operador sin holgura (ver migración 0012). Es lo que el
+    # dashboard abre para ajustar vértices: `polygon_geojson` trae las
+    # esquinas redondeadas de ST_Buffer y es inmanejable a mano. Nulo en los
+    # sitios que no lo tienen guardado — ahí hay que volver a trazar.
+    outline_geojson: dict | None
     still_seconds: int
     max_speed_kmh: float
     polygon_buffer_meters: int
@@ -58,11 +67,14 @@ class StandCreate(BaseModel):
 
 class StandUpdate(BaseModel):
     """Todo opcional — PATCH parcial. Mandar polygon_geojson reemplaza el
-    polígono (y apaga is_placeholder) sin tocar la fila existente; mandar
-    solo buffer_meters actualiza el número guardado pero NO vuelve a
-    aplicar el buffer sobre la forma ya guardada (no se conserva el trazo
-    original sin holgura) — para cambiar la holgura hay que volver a
-    mandar polygon_geojson junto con el buffer_meters nuevo."""
+    polígono (y apaga is_placeholder) sin tocar la fila existente.
+
+    Mandar solo buffer_meters rehace la geocerca a partir del trazo original
+    (`outline`, ver migración 0012) con la holgura nueva. En los sitios que
+    no tienen ese trazo guardado — los placeholder de la 0008 y aquellos
+    donde la aproximación de la 0012 no dio un polígono válido — solo se
+    actualiza el número, y hay que volver a trazarlos para que la holgura
+    tenga efecto sobre la forma."""
 
     name: str | None = Field(None, max_length=100)
     polygon_geojson: dict | None = None
