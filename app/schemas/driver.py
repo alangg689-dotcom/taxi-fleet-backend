@@ -16,7 +16,8 @@ def _normalize_numeral(value: str | None) -> str | None:
 
 
 class DriverCreate(BaseModel):
-    phone: str = Field(..., min_length=10, max_length=20, examples=["+525512345678"])
+    # Sin lada de país: la flotilla es mexicana y se capturan los 10 dígitos.
+    phone: str = Field(..., min_length=10, max_length=20, examples=["6441234567"])
     full_name: str = Field(..., max_length=150)
     license_number: str = Field(..., max_length=50)
     # Requerido al dar de alta: es como la operadora nombra al chofer por
