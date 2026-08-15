@@ -65,6 +65,26 @@ class Settings(BaseSettings):
     # Business propio, se reemplaza por el número real aprobado por Meta.
     TWILIO_WHATSAPP_FROM: str = "whatsapp:+14155238886"
 
+    # --- Bot de Telegram ---
+    # Token que da @BotFather. Vacío = el canal de Telegram queda apagado: el
+    # endpoint del bot lo rechaza en vez de crear viajes que nunca se van a
+    # poder contestar.
+    TELEGRAM_BOT_TOKEN: str = ""
+
+    # --- Puerta de entrada de los bots (POST /bot/request-ride) ---
+    # Ese endpoint crea viajes reales sin sesión de operador ni de chofer, así
+    # que no puede quedar abierto: quien lo alcance puede llenar la flotilla de
+    # servicios fantasma. El proceso del bot manda esta clave en X-Bot-Key.
+    # Vacía = el endpoint responde 503 (apagado), nunca "abierto a todos".
+    BOT_API_KEY: str = ""
+
+    # --- Aviso de llegada al punto de recogida ---
+    # Radio en metros para dar por llegada la unidad. 30 m es el orden del
+    # error típico de un GPS de celular en calle con edificios: más chico da
+    # falsos negativos (el taxi está en la puerta y nunca avisa), más grande
+    # avisa desde la esquina anterior.
+    TRIP_ARRIVAL_RADIUS_METERS: float = 30.0
+
     # --- Motor de despacho automático ---
     DISPATCH_OFFER_TIMEOUT_SECONDS: int = 25   # tiempo para aceptar/rechazar antes de pasar al siguiente
     DISPATCH_SEARCH_RADIUS_METERS: int = 15000  # 5000 se quedaba corto para 30-40km de cobertura real
@@ -83,7 +103,27 @@ class Settings(BaseSettings):
     # solo — se queda "solicitado" y este barrido lo reintenta, porque la
     # disponibilidad de la flota cambia con el tiempo (ver app.core.whatsapp_bot).
     BOT_TRIP_SWEEP_INTERVAL_SECONDS: int = 30
-    BOT_TRIP_MAX_WAIT_SECONDS: int = 1200  # 20 min — tope antes de avisarle al cliente que no hay
+    # Cuánto aguanta un viaje esperando chofer antes de que se le avise al
+    # cliente que no hay taxis. Dejó de ser fijo: en operación normal, más de
+    # 10 minutos sin colocar un viaje casi siempre significa que no va a
+    # haber, y decirlo pronto es mejor que dejar a alguien parado en la calle.
+    # Con la calle saturada la lectura se invierte — sí va a haber taxi, solo
+    # que tarda — y rendirse a los 10 minutos sería tirar un viaje que se
+    # habría podido servir.
+    BOT_TRIP_MAX_WAIT_SECONDS: int = 600                # 10 min — operación normal
+    BOT_TRIP_MAX_WAIT_HIGH_DEMAND_SECONDS: int = 1200   # 20 min — alta demanda
+    # "Alta demanda" exige las DOS condiciones a la vez. Seis viajes esperando
+    # con veinte choferes libres no es saturación, es una racha de un minuto; y
+    # dos choferes libres sin viajes en cola tampoco es problema de nadie.
+    HIGH_DEMAND_MIN_WAITING_TRIPS: int = 5
+    HIGH_DEMAND_MAX_AVAILABLE_DRIVERS: int = 3
+    # Techo de viajes CREADOS por cliente en /bot/request-ride (las peticiones
+    # que solo devuelven already_active no cuentan, ver app.api.bot). Generoso
+    # a propósito: el abuso real es un script en bucle, que haría cientos —
+    # un cliente que se arrepiente tres veces seguidas no es abuso. Mismo
+    # contador atómico de Redis que el throttle de login y el de pings.
+    BOT_RIDE_MAX_PER_WINDOW: int = 10
+    BOT_RIDE_WINDOW_SECONDS: int = 300
 
     # --- Sitios y fila de espera ---
     # Ver spec-sitios-y-fila-v2.md. Los defaults de sitio individual

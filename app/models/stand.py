@@ -54,6 +54,17 @@ class Stand(Base):
     center: Mapped[str] = mapped_column(
         Geography(geometry_type="POINT", srid=4326, spatial_index=True)
     )
+    # El trazo del operador SIN holgura — `polygon` es este mismo pasado por
+    # ST_Buffer. Se guarda para poder (a) editar vértices sobre una figura de
+    # pocos puntos y no sobre las esquinas redondeadas del buffer, y (b)
+    # recalcular el polígono cuando cambia la holgura, sin volver a trazar.
+    # Nulo en los placeholder de la 0008 y en los sitios donde la
+    # aproximación por erosión de la 0012 no dio un polígono válido: esos hay
+    # que volver a trazarlos. Sin índice espacial: nunca se consulta
+    # geométricamente, solo se lee y escribe por id del sitio.
+    outline: Mapped[str | None] = mapped_column(
+        Geography(geometry_type="POLYGON", srid=4326, spatial_index=False)
+    )
     still_seconds: Mapped[int] = mapped_column(Integer, default=45)
     max_speed_kmh: Mapped[float] = mapped_column(Float, default=5.0)
     polygon_buffer_meters: Mapped[int] = mapped_column(Integer, default=15)

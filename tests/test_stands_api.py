@@ -54,6 +54,87 @@ async def test_admin_can_create_stand(client, db_session):
     assert body["polygon_buffer_meters"] > 0  # se aplicó la holgura default
 
 
+def _lng_span(polygon_geojson: dict) -> float:
+    """Ancho del polígono en grados de longitud — sirve para comparar
+    tamaños sin depender de PostGIS desde la prueba."""
+    lngs = [lng for lng, _ in polygon_geojson["coordinates"][0]]
+    return max(lngs) - min(lngs)
+
+
+async def test_create_stand_saves_the_original_outline(client, db_session):
+    """El trazo se guarda aparte del polígono con holgura: es lo que el
+    dashboard abre para ajustar vértices. ST_Buffer redondea cada esquina en
+    8 segmentos, así que el polígono guardado tiene decenas de puntos donde
+    el trazo tiene 5 (4 esquinas + cierre) — editar ese es lo inmanejable."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+
+    response = await client.post(
+        "/api/v1/stands",
+        json={"name": "Sitio con trazo", "polygon_geojson": _square()},
+        headers=auth_headers(admin_token),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["outline_geojson"] is not None
+    assert len(body["outline_geojson"]["coordinates"][0]) == 5
+    assert len(body["polygon_geojson"]["coordinates"][0]) > 5
+
+
+async def test_changing_only_the_buffer_rebuilds_the_polygon(client, db_session):
+    """Antes de la 0012 mandar solo buffer_meters actualizaba el número y
+    dejaba la geocerca igual — el operador cambiaba la holgura y no pasaba
+    nada. Con el trazo guardado sí se rehace."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    headers = auth_headers(admin_token)
+
+    created = await client.post(
+        "/api/v1/stands",
+        json={"name": "Sitio holgura", "polygon_geojson": _square(), "buffer_meters": 5},
+        headers=headers,
+    )
+    stand_id = created.json()["id"]
+    span_before = _lng_span(created.json()["polygon_geojson"])
+
+    widened = await client.patch(
+        f"/api/v1/stands/{stand_id}",
+        json={"buffer_meters": 40},
+        headers=headers,
+    )
+
+    assert widened.status_code == 200
+    body = widened.json()
+    assert body["polygon_buffer_meters"] == 40
+    assert _lng_span(body["polygon_geojson"]) > span_before
+    # El trazo original no se toca: es la referencia de la que sale todo.
+    assert body["outline_geojson"] == created.json()["outline_geojson"]
+
+
+async def test_saving_a_buffered_geometry_clears_the_outline(client, db_session):
+    """apply_buffer=False significa "esto ya trae la holgura": de qué trazo
+    salió ya no se sabe, y conservar el anterior sería mentir sobre qué
+    produce este polígono."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    headers = auth_headers(admin_token)
+
+    created = await client.post(
+        "/api/v1/stands",
+        json={"name": "Sitio sin trazo", "polygon_geojson": _square()},
+        headers=headers,
+    )
+    stand_id = created.json()["id"]
+    assert created.json()["outline_geojson"] is not None
+
+    patched = await client.patch(
+        f"/api/v1/stands/{stand_id}",
+        json={"polygon_geojson": _square(half_side=0.0012), "apply_buffer": False},
+        headers=headers,
+    )
+
+    assert patched.status_code == 200
+    assert patched.json()["outline_geojson"] is None
+
+
 async def test_operator_cannot_create_stand(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
 

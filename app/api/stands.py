@@ -39,6 +39,7 @@ admin_only = require_roles(UserRole.ADMIN)
 _DETAIL_SELECT = """
     SELECT id, name, active, is_placeholder, still_seconds, max_speed_kmh, polygon_buffer_meters,
            ST_AsGeoJSON(polygon::geometry) AS polygon_geojson,
+           ST_AsGeoJSON(outline::geometry) AS outline_geojson,
            ST_Y(center::geometry) AS center_lat, ST_X(center::geometry) AS center_lng
     FROM stands WHERE id = :id
 """
@@ -48,7 +49,14 @@ async def _get_detail_row(db: AsyncSession, stand_id: uuid.UUID):
     row = (await db.execute(text(_DETAIL_SELECT), {"id": stand_id})).mappings().first()
     if row is None:
         return None
-    return {**row, "polygon_geojson": json.loads(row["polygon_geojson"])}
+    # outline puede venir NULL (placeholders de la 0008 y sitios donde la
+    # aproximación de la 0012 no dio un polígono válido) — ver el modelo.
+    outline = row["outline_geojson"]
+    return {
+        **row,
+        "polygon_geojson": json.loads(row["polygon_geojson"]),
+        "outline_geojson": json.loads(outline) if outline is not None else None,
+    }
 
 
 async def _get_detail_or_404(db: AsyncSession, stand_id: uuid.UUID) -> dict:
@@ -85,8 +93,16 @@ async def list_stands(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
-    result = await db.execute(select(Stand).order_by(Stand.name))
-    return list(result.scalars().all())
+    result = await db.execute(
+        text(
+            """
+            SELECT id, name, active, is_placeholder,
+                   ST_Y(center::geometry) AS center_lat, ST_X(center::geometry) AS center_lng
+            FROM stands ORDER BY name
+            """
+        )
+    )
+    return [StandOut(**row) for row in result.mappings().all()]
 
 
 @router.get("/{stand_id}", response_model=StandDetail)
@@ -121,10 +137,12 @@ async def create_stand(
         text(
             """
             INSERT INTO stands
-                (id, name, polygon, center, still_seconds, max_speed_kmh, polygon_buffer_meters, active, is_placeholder)
+                (id, name, polygon, outline, center, still_seconds, max_speed_kmh,
+                 polygon_buffer_meters, active, is_placeholder)
             VALUES (
                 :id, :name,
                 ST_Buffer(ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)::geography, :buffer_m),
+                ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)::geography,
                 ST_SetSRID(ST_Centroid(ST_GeomFromGeoJSON(:geojson)), 4326)::geography,
                 :still_seconds, :max_speed_kmh, :buffer_m, :active, false
             )
@@ -158,10 +176,16 @@ async def update_stand(
 
     `apply_buffer=False` guarda la geometría tal cual, sin volver a pasarle
     ST_Buffer: es para cuando lo que se manda YA salió de aquí con la
-    holgura aplicada (el dashboard al mover vértices, por ejemplo). Sin
-    eso, cada ajuste inflaría el polígono otros polygon_buffer_meters. La
-    holgura configurada del sitio no se toca en ese caso — solo se cambia
-    mandando buffer_meters explícito."""
+    holgura aplicada. Sin eso, cada ajuste inflaría el polígono otros
+    polygon_buffer_meters. Desde la 0012 el dashboard ya no lo necesita para
+    mover vértices — edita el trazo original (`outline`) y manda
+    apply_buffer=True — pero se conserva para los sitios que no tienen ese
+    trazo guardado.
+
+    Mandar solo buffer_meters ahora SÍ rehace la geocerca, siempre que el
+    sitio tenga `outline`: se vuelve a bufferear el trazo original con la
+    holgura nueva. Sin outline se queda en actualizar el número, como
+    antes."""
     current = await _get_detail_or_404(db, stand_id)
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
@@ -187,16 +211,47 @@ async def update_stand(
             "center = ST_SetSRID(ST_Centroid(ST_GeomFromGeoJSON(:geojson)), 4326)::geography",
             "polygon_buffer_meters = :buffer_m",
             "is_placeholder = false",
+            # Con apply_buffer lo que llega ES el trazo sin holgura, así que
+            # se guarda tal cual. Sin él llega una geometría que ya la trae:
+            # de ese trazo original ya no sabemos nada, y dejar el anterior
+            # guardado sería mentir sobre qué produce este polígono.
+            "outline = "
+            + (
+                "ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)::geography"
+                if payload.apply_buffer
+                else "NULL"
+            ),
         ]
         params["geojson"] = json.dumps(updates["polygon_geojson"])
         params["apply_m"] = buffer_to_apply
         params["buffer_m"] = configured_buffer
     elif "buffer_meters" in updates:
-        # Sin polygon_geojson no hay forma de volver a aplicar el buffer
-        # (no se guarda el trazo original sin holgura) — solo actualiza el
-        # número; ver docstring de StandUpdate.
+        new_buffer = updates["buffer_meters"]
         set_clauses.append("polygon_buffer_meters = :buffer_m")
-        params["buffer_m"] = updates["buffer_meters"]
+        params["buffer_m"] = new_buffer
+
+        if current["outline_geojson"] is not None:
+            # Con el trazo original guardado sí se puede rehacer la geocerca
+            # con la holgura nueva, que es justo lo que el operador pidió al
+            # cambiar el número. Se revisa encimamiento porque crecer la
+            # holgura puede meter el sitio dentro del de al lado.
+            overlap = await _find_overlap(
+                db, current["outline_geojson"], new_buffer, exclude_id=stand_id
+            )
+            if overlap is not None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Con esa holgura el sitio se encima con «{overlap['name']}»",
+                )
+            # Parámetro aparte del de la columna aunque el valor sea el
+            # mismo: polygon_buffer_meters es integer y la distancia de
+            # ST_Buffer es double precision, y asyncpg no puede deducir un
+            # solo tipo para $1 usado en los dos lugares.
+            set_clauses.append("polygon = ST_Buffer(outline, :buffer_distance)")
+            params["buffer_distance"] = float(new_buffer)
+        # Sin outline (placeholders de la 0008, o sitios donde la 0012 no
+        # pudo aproximarlo) solo se guarda el número: no hay de dónde
+        # recalcular la geocerca sin volver a trazar. El dashboard lo avisa.
 
     for field in ("name", "still_seconds", "max_speed_kmh", "active"):
         if field in updates:

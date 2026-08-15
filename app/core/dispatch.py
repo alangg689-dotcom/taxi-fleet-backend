@@ -88,6 +88,34 @@ async def set_vehicle_status(
             await handle_vehicle_freed(db, vehicle, trip_id)
 
 _ACTIVE_STATUSES = ("solicitado", "asignado", "en_curso")
+# Literales para las consultas en texto plano de los escalones de fila. Sale
+# de la constante de arriba para no tener dos listas que se desincronicen; no
+# lleva nada que venga del cliente.
+_ACTIVE_SQL = ", ".join(f"'{s}'" for s in _ACTIVE_STATUSES)
+
+# Una unidad ya comprometida no puede volver a ofrecerse. La consulta de los
+# escalones 2 y 3 traía estas guardas desde el principio; las de los escalones
+# 1 y 4 no, y por ahí se colaba una doble asignación: la primera de la fila
+# seguía en `formado` mientras tenía una oferta viva o un viaje encima, así
+# que el siguiente viaje de esa zona se la volvía a llevar.
+#
+# La segunda guarda (offered_vehicle_id) es la que cierra la carrera real:
+# durante la ventana de oferta el viaje todavía tiene vehicle_id NULO, así
+# que mirar solo vehicle_id no alcanza cuando dos dispatch_trip corren a la
+# vez — que es justo como se lanzan, con asyncio.create_task por viaje.
+_GUARDAS_CANDIDATO = f"""
+      AND NOT EXISTS (
+          SELECT 1 FROM trips t2
+          WHERE t2.vehicle_id = {{col}} AND t2.id != t.id
+            AND t2.status IN ({_ACTIVE_SQL})
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM trips t3
+          WHERE t3.offered_vehicle_id = {{col}} AND t3.id != t.id
+            AND t3.status = 'solicitado'
+            AND (t3.offer_expires_at IS NULL OR t3.offer_expires_at > now())
+      )
+"""
 
 
 @dataclass
@@ -111,21 +139,30 @@ async def _tier1_head_of_queue(db: AsyncSession, trip_id: uuid.UUID, zone_id: uu
     row = (
         await db.execute(
             text(
-                """
+                f"""
                 SELECT sq.vehicle_id, sq.driver_id, ST_Distance(p.location, t.origin) AS distance_m
                 FROM stand_queue sq
                 JOIN trips t ON t.id = :trip_id
+                JOIN vehicles v ON v.id = sq.vehicle_id AND v.status = 'disponible'
+                JOIN vehicle_assignments va
+                    ON va.vehicle_id = sq.vehicle_id AND va.ended_at IS NULL
                 JOIN LATERAL (
                     SELECT location FROM location_pings lp
                     WHERE lp.vehicle_id = sq.vehicle_id
+                      AND lp.timestamp > now() - make_interval(secs => :freshness)
                     ORDER BY lp.timestamp DESC LIMIT 1
                 ) p ON true
                 WHERE sq.stand_id = :zone_id AND sq.status = 'formado'
+                {_GUARDAS_CANDIDATO.format(col="sq.vehicle_id")}
                 ORDER BY sq.position_held DESC, sq.entered_at ASC
                 LIMIT 1
                 """
             ),
-            {"trip_id": trip_id, "zone_id": zone_id},
+            {
+                "trip_id": trip_id,
+                "zone_id": zone_id,
+                "freshness": settings.DISPATCH_POSITION_FRESHNESS_SECONDS,
+            },
         )
     ).mappings().first()
     if row is None:
@@ -141,22 +178,31 @@ async def _tier4_other_stands_heads(
     sitio se ofrece para el viaje de otra zona."""
     rows = await db.execute(
         text(
-            """
+            f"""
             SELECT DISTINCT ON (sq.stand_id)
                    sq.vehicle_id, sq.driver_id, ST_Distance(p.location, t.origin) AS distance_m
             FROM stand_queue sq
             JOIN trips t ON t.id = :trip_id
             JOIN stands s ON s.id = sq.stand_id AND s.active = true AND s.id != :zone_id
+            JOIN vehicles v ON v.id = sq.vehicle_id AND v.status = 'disponible'
+            JOIN vehicle_assignments va
+                ON va.vehicle_id = sq.vehicle_id AND va.ended_at IS NULL
             JOIN LATERAL (
                 SELECT location FROM location_pings lp
                 WHERE lp.vehicle_id = sq.vehicle_id
+                  AND lp.timestamp > now() - make_interval(secs => :freshness)
                 ORDER BY lp.timestamp DESC LIMIT 1
             ) p ON true
             WHERE sq.status = 'formado'
+            {_GUARDAS_CANDIDATO.format(col="sq.vehicle_id")}
             ORDER BY sq.stand_id, sq.position_held DESC, sq.entered_at ASC
             """
         ),
-        {"trip_id": trip_id, "zone_id": zone_id},
+        {
+            "trip_id": trip_id,
+            "zone_id": zone_id,
+            "freshness": settings.DISPATCH_POSITION_FRESHNESS_SECONDS,
+        },
     )
     candidates = [
         Candidate(driver_id=r["driver_id"], vehicle_id=r["vehicle_id"], distance_m=r["distance_m"])
@@ -194,6 +240,16 @@ async def _tier2_and_tier3_roaming(
                   WHERE t2.vehicle_id = p.vehicle_id
                     AND t2.id != t.id
                     AND t2.status IN :active_statuses
+              )
+              -- Una oferta viva todavía no fija vehicle_id (ver dispatch_trip),
+              -- así que la guarda de arriba no la ve: sin esto, dos viajes
+              -- despachados a la vez se ofrecen a la misma unidad.
+              AND NOT EXISTS (
+                  SELECT 1 FROM trips t3
+                  WHERE t3.offered_vehicle_id = p.vehicle_id
+                    AND t3.id != t.id
+                    AND t3.status = 'solicitado'
+                    AND (t3.offer_expires_at IS NULL OR t3.offer_expires_at > now())
               )
               AND NOT EXISTS (
                   SELECT 1 FROM stand_queue sq

@@ -24,6 +24,7 @@ from app.core.redis_client import (
     publish_location_update,
     set_last_position,
 )
+from app.core.arrival import run_arrival_check
 from app.core.stands import run_queue_evaluation_batch
 from app.database import get_db
 from app.models import LocationPing, User, UserRole, Vehicle
@@ -93,6 +94,12 @@ async def _persist_pings(
 
     if eligible_pings:
         asyncio.create_task(run_queue_evaluation_batch(vehicle_id, eligible_pings))
+        # Solo con el último punto elegible del lote: al vaciarse un buffer
+        # offline, los anteriores son historia y avisar "ya llegué" por una
+        # posición de hace diez minutos sería mentira. Va aparte de la
+        # evaluación de fila porque son preguntas distintas al mismo dato.
+        last = eligible_pings[-1]
+        asyncio.create_task(run_arrival_check(vehicle_id, last.lat, last.lng))
 
     return result.rowcount or 0
 

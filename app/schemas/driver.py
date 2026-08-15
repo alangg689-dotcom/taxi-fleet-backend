@@ -2,20 +2,38 @@
 
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import DriverStatus
 
 
+def _normalize_numeral(value: str | None) -> str | None:
+    """Sin esto "r18" y "R18" serían dos numerales distintos para el índice
+    único y el mismo para la operadora, que es la que importa."""
+    if value is None:
+        return None
+    return value.strip().upper()
+
+
 class DriverCreate(BaseModel):
-    phone: str = Field(..., min_length=10, max_length=20, examples=["+525512345678"])
+    # Sin lada de país: la flotilla es mexicana y se capturan los 10 dígitos.
+    phone: str = Field(..., min_length=10, max_length=20, examples=["6441234567"])
     full_name: str = Field(..., max_length=150)
     license_number: str = Field(..., max_length=50)
+    # Requerido al dar de alta: es como la operadora nombra al chofer por
+    # radio, no un dato accesorio. Los que ya existían quedaron en NULL (ver
+    # migración 0011) y se les asigna con PATCH /drivers/{id}.
+    numeral: str = Field(..., min_length=1, max_length=10, examples=["R18"])
+
+    _normalize = field_validator("numeral")(_normalize_numeral)
 
 
 class DriverUpdate(BaseModel):
     full_name: str | None = Field(None, max_length=150)
     status: DriverStatus | None = None
+    numeral: str | None = Field(None, min_length=1, max_length=10)
+
+    _normalize = field_validator("numeral")(_normalize_numeral)
 
 
 class PushTokenUpdate(BaseModel):
@@ -33,12 +51,19 @@ class DriverOut(BaseModel):
     phone: str
     full_name: str
     license_number: str
+    # Nulo solo para los choferes anteriores a la migración 0011, que todavía
+    # no tienen numeral asignado.
+    numeral: str | None
     status: DriverStatus
     is_active: bool
     # Derivado (pin_hash is not None) — nunca el hash mismo. Para que el
     # dashboard distinga a quién le falta asignarle un PIN todavía (los
     # migrados del login por OTP nacieron sin uno).
     has_pin: bool
+    # Unidad del turno abierto, si trae uno. Nulos = chofer libre, y son los
+    # únicos que el dashboard ofrece al asignar una unidad.
+    current_vehicle_id: UUID | None = None
+    current_vehicle_plate: str | None = None
 
 
 class DriverCreated(DriverOut):

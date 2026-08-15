@@ -18,16 +18,21 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from geoalchemy2 import Geometry
-from sqlalchemy import cast, func, select
+from sqlalchemy import cast, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.location import _point
 from app.core.deps import require_roles
+from app.config import settings
+from app.core.demand import measure_demand
 from app.core.dispatch import dispatch_trip, set_vehicle_status
-from app.core.whatsapp import send_whatsapp_message
+from app.core.customer_notify import has_customer, notify_customer
+from app.core.redis_client import get_last_position
+from app.core.whatsapp_bot import prompt_rating
 from app.database import get_db
 from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleAssignment, VehicleStatus
 from app.schemas.trip import (
+    DemandOut,
     TripComplete,
     TripCreate,
     TripDispatchCreate,
@@ -36,6 +41,14 @@ from app.schemas.trip import (
 )
 
 router = APIRouter(prefix="/trips", tags=["viajes"])
+
+# Sin detalle de quién canceló ni por qué: al cliente parado en la calle lo
+# que le sirve es saber que ese taxi ya no va y que puede volver a pedir, no
+# la política interna de la base.
+_CANCELLED_BY_FLEET = (
+    "Tu viaje fue cancelado por la base. Lamentamos el inconveniente — "
+    "escríbenos de nuevo cuando quieras pedir otro taxi."
+)
 
 staff_only = require_roles(UserRole.OPERATOR, UserRole.ADMIN)
 driver_or_staff = require_roles(UserRole.DRIVER, UserRole.OPERATOR, UserRole.ADMIN)
@@ -121,8 +134,17 @@ async def create_trip(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
-    if await db.get(Vehicle, payload.vehicle_id) is None:
+    vehicle = await db.get(Vehicle, payload.vehicle_id)
+    if vehicle is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
+    # `offline` y `mantenimiento` son decisión exclusiva de un operador y
+    # set_vehicle_status no los pisa (ver app.core.dispatch): sin este corte
+    # el viaje se creaba igual y quedaba asignado a una unidad que no está
+    # trabajando, sin nada que lo moviera después. Es preferible rechazarlo.
+    if vehicle.status in (VehicleStatus.OFFLINE, VehicleStatus.MANTENIMIENTO):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "La unidad no está disponible para recibir viajes"
+        )
     if await db.get(Driver, payload.driver_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chofer no encontrado")
 
@@ -149,6 +171,12 @@ async def create_trip(
     )
     db.add(trip)
     await db.flush()
+    # La unidad queda comprometida desde el alta, no hasta que el chofer
+    # acepte: el operador ya la eligió. Sin esto se quedaba `disponible` y
+    # —peor— su renglón de fila seguía en `formado`, así que el dashboard la
+    # mostraba formada mientras llevaba pasajero. handle_vehicle_dispatched
+    # (dentro de set_vehicle_status) es quien congela ese lugar.
+    await set_vehicle_status(db, payload.vehicle_id, VehicleStatus.OCUPADO)
     return await _get_trip_out(db, trip.id)
 
 
@@ -287,6 +315,32 @@ async def list_trips(
     return [TripOut(**row) for row in result.mappings().all()]
 
 
+# ANTES que /{trip_id} a propósito: al revés, esa ruta se traga "demand" e
+# intenta leerlo como UUID. Es la misma trampa que /vehicles/nearby, anotada
+# en el CLAUDE.md del proyecto.
+@router.get("/demand", response_model=DemandOut)
+async def get_demand(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Presión de demanda del momento: cuántos viajes esperan chofer, cuántos
+    choferes pueden tomarlos, y cuánto aguanta hoy un viaje antes de que se le
+    avise al cliente que no hay taxis.
+
+    El dashboard colorea la espera de cada viaje con estos umbrales en vez de
+    llevar los suyos escritos a mano: si se cambian por variable de entorno, el
+    semáforo del panel sigue diciendo la verdad sin recompilar nada."""
+    demand = await measure_demand(db)
+    return DemandOut(
+        waiting_trips=demand.waiting_trips,
+        available_drivers=demand.available_drivers,
+        high_demand=demand.high_demand,
+        max_wait_seconds=demand.max_wait_seconds,
+        normal_wait_seconds=settings.BOT_TRIP_MAX_WAIT_SECONDS,
+        high_demand_wait_seconds=settings.BOT_TRIP_MAX_WAIT_HIGH_DEMAND_SECONDS,
+    )
+
+
 @router.get("/{trip_id}", response_model=TripOut)
 async def get_trip(
     trip_id: uuid.UUID,
@@ -334,15 +388,45 @@ async def accept_trip(
     trip.offer_expires_at = None
     await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.OCUPADO)
 
-    if trip.customer_phone:
-        vehicle = await db.get(Vehicle, trip.vehicle_id)
-        plate = vehicle.plate if vehicle is not None else "sin placa"
-        await send_whatsapp_message(
-            trip.customer_phone,
-            f"¡Un taxi va en camino! Unidad {plate}. Te avisamos cuando llegue.",
-        )
+    if has_customer(trip):
+        await notify_customer(trip, await _assigned_message(db, trip))
 
     return await _get_trip_out(db, trip_id)
+
+
+async def _assigned_message(db: AsyncSession, trip: Trip) -> str:
+    """"Taxi asignado" con el numeral del chofer y, si hay GPS fresco, los
+    minutos estimados de llegada. El numeral y no la placa: es lo que el
+    cliente puede leer en el costado del carro que se le acerca."""
+    driver = await db.get(Driver, trip.driver_id) if trip.driver_id else None
+    who = driver.numeral if driver is not None and driver.numeral else None
+    if who is None:
+        vehicle = await db.get(Vehicle, trip.vehicle_id)
+        who = f"unidad {vehicle.plate}" if vehicle is not None else "una unidad"
+
+    eta = ""
+    position = await get_last_position(str(trip.vehicle_id))
+    if position is not None:
+        row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT ST_Distance(
+                        ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography,
+                        origin
+                    ) FROM trips WHERE id = :trip_id
+                    """
+                ),
+                {"lat": position["lat"], "lng": position["lng"], "trip_id": trip.id},
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            minutes = max(
+                1, round((row / 1000) / settings.DISPATCH_ETA_SPEED_KMH * 60)
+            )
+            eta = f" Llegará en unos {minutes} min."
+
+    return f"✅ ¡Taxi asignado! Conductor {who}.{eta} Te avisamos cuando llegue."
 
 
 @router.post("/{trip_id}/reject", response_model=TripOut)
@@ -378,6 +462,11 @@ async def start_trip(
     await _authorize_trip(trip, user, db)
     _apply_transition(trip, TripStatus.ASIGNADO, TripStatus.EN_CURSO)
     trip.started_at = datetime.now(UTC)
+
+    if has_customer(trip):
+        await notify_customer(
+            trip, "✅ El viaje ha comenzado. Gracias por viajar con Los Tigres."
+        )
     return await _get_trip_out(db, trip_id)
 
 
@@ -397,21 +486,91 @@ async def complete_trip(
     trip.completed_at = datetime.now(UTC)
     trip.fare = payload.fare
     await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE, trip_id=trip.id)
+
+    # La calificación solo tiene cauce en WhatsApp: la conversación del bot
+    # vive keyed por teléfono. Un cliente de otro canal recibe la despedida
+    # sin la invitación a calificar, que no podría procesar.
+    if trip.customer_phone:
+        await prompt_rating(trip)
+        await notify_customer(
+            trip,
+            "🎯 ¡Llegaste a tu destino! Gracias por viajar con Los Tigres. "
+            "Califica tu viaje respondiendo con un número del 1 al 5.",
+        )
+    elif has_customer(trip):
+        await notify_customer(
+            trip, "🎯 ¡Llegaste a tu destino! Gracias por viajar con Los Tigres."
+        )
     return await _get_trip_out(db, trip_id)
+
+
+async def _driver_eta_seconds(db: AsyncSession, trip: Trip) -> float | None:
+    """Segundos estimados para que la unidad asignada llegue al punto de
+    recogida, con la última posición cacheada y la misma velocidad proxy del
+    motor de despacho. None si no hay unidad o no hay GPS fresco."""
+    if trip.vehicle_id is None:
+        return None
+    position = await get_last_position(str(trip.vehicle_id))
+    if position is None:
+        return None
+    distance_m = (
+        await db.execute(
+            text(
+                """
+                SELECT ST_Distance(
+                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, origin
+                ) FROM trips WHERE id = :trip_id
+                """
+            ),
+            {"lat": position["lat"], "lng": position["lng"], "trip_id": trip.id},
+        )
+    ).scalar_one_or_none()
+    if distance_m is None:
+        return None
+    return (distance_m / 1000) / settings.DISPATCH_ETA_SPEED_KMH * 3600
 
 
 @router.post("/{trip_id}/cancel", response_model=TripOut)
 async def cancel_trip(
     trip_id: uuid.UUID,
+    force: bool = False,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(driver_or_staff),
 ):
+    """Cancela desde la base o desde la app del chofer.
+
+    Al cliente SÍ hay que avisarle. Sin esto se quedaba parado en la calle
+    esperando un taxi que ya no iba: el viaje moría en la tabla y el último
+    mensaje que había recibido seguía diciendo que venía uno en camino. Es el
+    mismo motivo por el que el barrido avisa al rendirse.
+
+    Con el chofer ya a punto de llegar (< 2 min del punto de recogida), la
+    cancelación de staff exige `force=true`: el 409 le da al dashboard la
+    oportunidad de preguntarle al operador antes de dejar plantado a un
+    cliente que ya está viendo acercarse su taxi. Solo aplica a staff — el
+    chofer que cancela estando a una cuadra sabe perfectamente dónde está.
+    """
     trip = await _get_trip_or_404(db, trip_id)
     await _authorize_trip(trip, user, db)
     if trip.status not in _ACTIVE_STATUSES:
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"El viaje ya está '{trip.status.value}'"
         )
+
+    if (
+        not force
+        and user.role in (UserRole.OPERATOR, UserRole.ADMIN)
+        and trip.status == TripStatus.ASIGNADO
+    ):
+        eta = await _driver_eta_seconds(db, trip)
+        if eta is not None and eta < 120:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"DRIVER_ARRIVING:{round(eta)}",
+            )
     trip.status = TripStatus.CANCELADO
     await set_vehicle_status(db, trip.vehicle_id, VehicleStatus.DISPONIBLE, trip_id=trip.id)
+
+    if has_customer(trip):
+        await notify_customer(trip, _CANCELLED_BY_FLEET)
     return await _get_trip_out(db, trip_id)

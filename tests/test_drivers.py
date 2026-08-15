@@ -11,6 +11,7 @@ async def test_admin_can_create_driver(client, db_session):
             "phone": "+525512340099",
             "full_name": "Juan Pérez",
             "license_number": "LIC-99000",
+            "numeral": "R101",
         },
         headers=auth_headers(admin_token),
     )
@@ -18,6 +19,7 @@ async def test_admin_can_create_driver(client, db_session):
     body = response.json()
     assert body["phone"] == "+525512340099"
     assert body["full_name"] == "Juan Pérez"
+    assert body["numeral"] == "R101"
     assert body["status"] == "activo"
     assert len(body["pin"]) == 6
     assert body["pin"].isdigit()
@@ -52,6 +54,7 @@ async def test_operator_cannot_create_driver(client, db_session):
             "phone": "+525512340098",
             "full_name": "Alguien",
             "license_number": "LIC-99001",
+            "numeral": "R102",
         },
         headers=auth_headers(operator_token),
     )
@@ -67,6 +70,7 @@ async def test_driver_cannot_create_driver(client, db_session):
             "phone": "+525512340097",
             "full_name": "Alguien",
             "license_number": "LIC-99002",
+            "numeral": "R103",
         },
         headers=auth_headers(driver_token),
     )
@@ -83,6 +87,7 @@ async def test_duplicate_phone_is_conflict(client, db_session):
             "phone": "+525512340096",
             "full_name": "Otro",
             "license_number": "LIC-99003",
+            "numeral": "R104",
         },
         headers=auth_headers(admin_token),
     )
@@ -99,10 +104,93 @@ async def test_duplicate_license_is_conflict(client, db_session):
             "phone": "+525512340095",
             "full_name": "Otro",
             "license_number": "LIC-DUPLICADA",
+            "numeral": "R105",
         },
         headers=auth_headers(admin_token),
     )
     assert response.status_code == 409
+
+
+async def test_numeral_is_required_on_create(client, db_session):
+    """Es como la operadora nombra al chofer por radio: dar de alta uno sin
+    numeral dejaría una unidad imposible de llamar en el mapa."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+
+    response = await client.post(
+        "/api/v1/drivers",
+        json={
+            "phone": "+525512340092",
+            "full_name": "Sin numeral",
+            "license_number": "LIC-99004",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 422
+
+
+async def test_duplicate_numeral_is_conflict(client, db_session):
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    await make_driver(db_session, numeral="R777")
+
+    response = await client.post(
+        "/api/v1/drivers",
+        json={
+            "phone": "+525512340091",
+            "full_name": "Otro",
+            "license_number": "LIC-99005",
+            "numeral": "R777",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 409
+
+
+async def test_numeral_is_normalized_to_uppercase(client, db_session):
+    """"r18" y "R18" son el mismo numeral para la operadora; sin normalizar
+    serían dos distintos para el índice único."""
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+
+    created = await client.post(
+        "/api/v1/drivers",
+        json={
+            "phone": "+525512340090",
+            "full_name": "Minúsculas",
+            "license_number": "LIC-99006",
+            "numeral": " r18 ",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert created.status_code == 201
+    assert created.json()["numeral"] == "R18"
+
+    duplicate = await client.post(
+        "/api/v1/drivers",
+        json={
+            "phone": "+525512340089",
+            "full_name": "Mayúsculas",
+            "license_number": "LIC-99007",
+            "numeral": "R18",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert duplicate.status_code == 409
+
+
+async def test_operator_can_assign_numeral_to_migrated_driver(client, db_session):
+    """Los choferes anteriores a la 0011 nacieron con numeral NULL, igual que
+    con pin_hash: el operador se los asigna después."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    driver, _ = await make_driver(db_session)
+    driver.numeral = None
+    await db_session.flush()
+
+    response = await client.patch(
+        f"/api/v1/drivers/{driver.id}",
+        json={"numeral": "R20"},
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 200
+    assert response.json()["numeral"] == "R20"
 
 
 async def test_list_and_get_driver(client, db_session):

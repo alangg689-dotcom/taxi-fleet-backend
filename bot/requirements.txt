@@ -1,0 +1,6 @@
+# Dependencias del bot de Telegram. Van aparte de requirements.txt porque el
+# bot es un proceso distinto del backend: la API no necesita python-telegram-bot
+# para arrancar (los mensajes que ella manda salen por httpx directo a la Bot
+# API, ver app/core/telegram.py).
+python-telegram-bot==21.9
+httpx==0.28.1

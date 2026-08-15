@@ -6,3 +6,10 @@ venv/
 *.egg-info/
 .pytest_cache/
 *.log
+
+# Scripts de prueba local (simuladores de flota y carga de sitios de ejemplo).
+# Se ignoran uno por uno a proposito: scripts/ tambien tiene seed_admin.py, que
+# si esta versionado y es parte del arranque documentado en el README.
+scripts/sim_*.py
+scripts/carga_sitios.py
+scripts/sitios.json

@@ -16,10 +16,37 @@ import pytest_asyncio
 import app.core.whatsapp_bot as bot
 from app.api.location import _point
 from app.config import settings
+from app.core.demand import Demand
 from app.database import SessionLocal, engine
 from app.models import Trip, TripStatus
 
 _PHONE = "+525512340099"
+
+
+def _pin_demand(monkeypatch, *, high: bool = False) -> None:
+    """Fija la presión de demanda en vez de dejar que la mida.
+
+    `measure_demand` cuenta TODOS los viajes esperando del sistema, y estas
+    pruebas escriben con SessionLocal —fuera del SAVEPOINT que revierte al
+    final—, así que lo que dejó otra prueba en la tabla decidiría aquí si el
+    viaje se cancela o no. Lo que se prueba en este archivo es el barrido, no
+    la medición: esa tiene sus propias pruebas en test_demand.py.
+    """
+    demand = Demand(
+        waiting_trips=0,
+        available_drivers=0,
+        high_demand=high,
+        max_wait_seconds=(
+            settings.BOT_TRIP_MAX_WAIT_HIGH_DEMAND_SECONDS
+            if high
+            else settings.BOT_TRIP_MAX_WAIT_SECONDS
+        ),
+    )
+
+    async def _fake_measure(_db):
+        return demand
+
+    monkeypatch.setattr(bot, "measure_demand", _fake_measure)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -97,7 +124,16 @@ async def test_trip_still_active_true_for_old_solicitado():
     assert await bot._trip_still_active(trip) is True
 
 
-# --- handle_incoming_message --------------------------------------------------
+# --- handle_incoming_message: el flujo completo -------------------------------
+
+
+async def _request_full_trip(destination: str = "Clínica 4") -> tuple[str, str, str]:
+    """Recorre el flujo entero: ubicación → destino → confirmación. Devuelve
+    las tres respuestas del bot en orden."""
+    r1 = await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    r2 = await bot.handle_incoming_message(_PHONE, None, None, destination)
+    r3 = await bot.handle_incoming_message(_PHONE, None, None, "sí")
+    return r1, r2, r3
 
 
 async def test_message_without_location_sends_greeting():
@@ -105,40 +141,88 @@ async def test_message_without_location_sends_greeting():
     assert reply == bot._GREETING
 
 
-async def test_message_with_location_creates_trip_and_dispatches(monkeypatch):
+async def test_flujo_completo_ubicacion_destino_confirmacion(monkeypatch):
+    """El viaje ya no se crea con la pura ubicación: primero se pide el
+    destino y luego la confirmación. Nada toca la base hasta el "sí"."""
     monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
 
-    reply = await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
-    assert reply == bot._SEARCHING
+    ask_dest, confirm_prompt, searching = await _request_full_trip("Clínica 4")
+
+    assert "envíanos tu destino" in ask_dest
+    assert "Clínica 4" in confirm_prompt and "Confirmas" in confirm_prompt
+    assert "Buscando un taxi" in searching
 
     trip_id = await bot._get_active_trip_id(_PHONE)
     assert trip_id is not None
-
     trip = await _fetch_trip(trip_id)
-    assert trip is not None
     assert trip.customer_phone == _PHONE
     assert trip.status == TripStatus.SOLICITADO
+    assert trip.destination_address == "Clínica 4"
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_no_se_crea_viaje_antes_de_confirmar(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+
+    await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    await bot.handle_incoming_message(_PHONE, None, None, "Clínica 4")
+
+    # En medio de la conversación no hay viaje todavía.
+    assert await bot._get_active_trip_id(_PHONE) is None
 
     await bot._clear_active_trip(_PHONE)
 
 
-async def test_message_with_active_trip_does_not_create_another(monkeypatch):
+async def test_destino_por_ubicacion_compartida(monkeypatch):
+    """El destino puede llegar como segunda ubicación en vez de texto."""
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    confirm_prompt = await bot.handle_incoming_message(_PHONE, 19.44, -99.14)
+    assert "Confirmas" in confirm_prompt
+
+    await bot.handle_incoming_message(_PHONE, None, None, "sí")
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    trip = await _fetch_trip(trip_id)
+    assert trip.destination is not None
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_cancelar_a_media_solicitud_la_descarta(monkeypatch):
+    """Antes del "sí" no hay viaje: cancelar solo tira el borrador, sin
+    preguntar dos veces ni tocar la base."""
     monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
 
     await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "cancelar")
+
+    assert reply == bot._REQUEST_DISCARDED
+    assert await bot._get_active_trip_id(_PHONE) is None
+
+
+async def test_message_with_active_trip_does_not_create_another(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
     first_trip_id = await bot._get_active_trip_id(_PHONE)
 
     reply = await bot.handle_incoming_message(_PHONE, 19.5, -99.2)
     assert reply == bot._ALREADY_ACTIVE
     assert await bot._get_active_trip_id(_PHONE) == first_trip_id
 
-    await bot._clear_active_trip(_PHONE)
+    await _cleanup_trip(first_trip_id)
 
 
 async def test_message_after_trip_finished_allows_new_request(monkeypatch):
     monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
 
-    await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    await _request_full_trip()
     first_trip_id = await bot._get_active_trip_id(_PHONE)
 
     async with SessionLocal() as db:
@@ -147,40 +231,51 @@ async def test_message_after_trip_finished_allows_new_request(monkeypatch):
         await db.commit()
 
     reply = await bot.handle_incoming_message(_PHONE, 19.5, -99.2)
-    assert reply == bot._SEARCHING
+    assert "destino" in reply  # arranca una solicitud nueva
 
-    second_trip_id = await bot._get_active_trip_id(_PHONE)
-    assert second_trip_id != first_trip_id
-
-    await bot._clear_active_trip(_PHONE)
+    await _cleanup_trip(first_trip_id)
 
 
 # --- Comando "cancelar" ---------------------------------------------------------
 
 
-async def test_cancelar_cancels_the_active_trip(monkeypatch):
+async def test_cancelar_pide_confirmacion_y_luego_cancela(monkeypatch):
+    """Con un viaje real de por medio, "cancelar" pregunta antes: tecleado a
+    medias o por error dejaría a alguien sin el taxi que sí quería."""
     monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
 
-    await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    await _request_full_trip()
     trip_id = await bot._get_active_trip_id(_PHONE)
 
-    reply = await bot.handle_incoming_message(_PHONE, None, None, "cancelar")
-    assert reply == bot._CANCELLED
+    ask = await bot.handle_incoming_message(_PHONE, None, None, "cancelar")
+    assert "seguro" in ask.lower()
+    # Todavía nada cambió.
+    assert (await _fetch_trip(trip_id)).status == TripStatus.SOLICITADO
 
-    trip = await _fetch_trip(trip_id)
-    assert trip.status == TripStatus.CANCELADO
-    # La conversación queda limpia: puede volver a pedir de inmediato.
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "sí")
+    assert reply == bot._CANCELLED
+    assert (await _fetch_trip(trip_id)).status == TripStatus.CANCELADO
     assert await bot._get_active_trip_id(_PHONE) is None
 
+    await _cleanup_trip(trip_id)
 
-async def test_cancelar_is_case_and_space_insensitive(monkeypatch):
+
+async def test_arrepentirse_de_cancelar_conserva_el_viaje(monkeypatch):
     monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
 
-    await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
-    reply = await bot.handle_incoming_message(_PHONE, None, None, "  CANCELAR  ")
-    assert reply == bot._CANCELLED
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
 
-    await bot._clear_active_trip(_PHONE)
+    await bot.handle_incoming_message(_PHONE, None, None, "cancelar")
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "mejor no")
+
+    assert reply == bot._ALREADY_ACTIVE
+    assert (await _fetch_trip(trip_id)).status == TripStatus.SOLICITADO
+    assert await bot._get_active_trip_id(_PHONE) == trip_id
+
+    await _cleanup_trip(trip_id)
 
 
 async def test_cancelar_without_active_trip_says_so():
@@ -192,8 +287,9 @@ async def test_normal_text_is_not_confused_with_cancelar(monkeypatch):
     """Solo la palabra sola cancela — un mensaje que la mencione de pasada
     no debe tumbar el viaje de alguien que está esperando su taxi."""
     monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
 
-    await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    await _request_full_trip()
     trip_id = await bot._get_active_trip_id(_PHONE)
 
     reply = await bot.handle_incoming_message(
@@ -204,7 +300,52 @@ async def test_normal_text_is_not_confused_with_cancelar(monkeypatch):
     trip = await _fetch_trip(trip_id)
     assert trip.status == TripStatus.SOLICITADO
 
-    await bot._clear_active_trip(_PHONE)
+    await _cleanup_trip(trip_id)
+
+
+# --- Calificación ---------------------------------------------------------------
+
+
+async def test_calificacion_se_guarda_tras_completar(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.COMPLETADO
+        await db.commit()
+        await bot.prompt_rating(trip)
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "5")
+    assert reply == bot._RATING_THANKS
+    assert (await _fetch_trip(trip_id)).rating == 5
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_calificacion_fuera_de_rango_se_rechaza(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.COMPLETADO
+        await db.commit()
+        await bot.prompt_rating(trip)
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "9")
+    assert reply == bot._RATING_INVALID
+    assert (await _fetch_trip(trip_id)).rating is None
+
+    # Y una ubicación nueva la descarta sin drama: el cliente pasó a otra cosa.
+    reply = await bot.handle_incoming_message(_PHONE, 19.4326, -99.1332)
+    assert "destino" in reply
+
+    await _cleanup_trip(trip_id)
 
 
 # --- sweep_stuck_bot_trips ------------------------------------------------------
@@ -269,10 +410,15 @@ async def test_sweep_gives_up_after_max_wait(monkeypatch):
     cliente — esperar para siempre sería peor que un "no encontramos"."""
     sent = []
 
-    async def _fake_send(phone, body):
-        sent.append((phone, body))
+    # notify_customer y no send_whatsapp_message: desde que hay más de un canal,
+    # el barrido no sabe (ni debe saber) por dónde le contesta al cliente — eso
+    # lo decide app.core.customer_notify a partir del viaje.
+    async def _fake_notify(trip, body):
+        sent.append((trip.customer_phone, body))
 
-    monkeypatch.setattr(bot, "send_whatsapp_message", _fake_send)
+    monkeypatch.setattr(bot, "notify_customer", _fake_notify)
+
+    _pin_demand(monkeypatch)
 
     stale = datetime.now(UTC) - timedelta(seconds=settings.BOT_TRIP_MAX_WAIT_SECONDS + 60)
     async with SessionLocal() as db:
@@ -289,8 +435,46 @@ async def test_sweep_gives_up_after_max_wait(monkeypatch):
 
     trip = await _fetch_trip(trip_id)
     assert trip.status == TripStatus.CANCELADO
-    assert sent == [(_PHONE, bot._GAVE_UP)]
+    # `in` y no igualdad: el barrido recorre TODOS los viajes de la tabla, y
+    # otras pruebas de este archivo dejan los suyos (escriben con SessionLocal,
+    # fuera del SAVEPOINT). Que además cancele esos es correcto — ya vencieron
+    # — pero no es lo que esta prueba afirma.
+    assert (_PHONE, bot._GAVE_UP) in sent
     assert await bot._get_active_trip_id(_PHONE) is None
+
+
+async def test_sweep_aguanta_mas_en_alta_demanda(monkeypatch):
+    """El mismo viaje que se cancelaría en operación normal sobrevive con la
+    calle saturada: ahí sí va a haber taxi, solo que tarda, y rendirse al tope
+    corto tiraría un servicio que se habría podido dar."""
+    sent = []
+
+    async def _fake_notify(trip, body):
+        sent.append((trip.customer_phone, body))
+
+    monkeypatch.setattr(bot, "notify_customer", _fake_notify)
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch, high=True)
+
+    stale = datetime.now(UTC) - timedelta(seconds=settings.BOT_TRIP_MAX_WAIT_SECONDS + 60)
+    async with SessionLocal() as db:
+        trip = Trip(
+            origin=_point(19.4326, -99.1332), customer_phone=_PHONE, requested_at=stale
+        )
+        db.add(trip)
+        await db.flush()
+        trip_id = trip.id
+        await db.commit()
+    await bot._set_active_trip(_PHONE, trip_id)
+
+    await bot.sweep_stuck_bot_trips()
+
+    trip = await _fetch_trip(trip_id)
+    assert trip.status == TripStatus.SOLICITADO
+    assert sent == []
+
+    await bot._clear_active_trip(_PHONE)
+    await _cleanup_trip(trip_id)
 
 
 async def test_sweep_ignores_operator_trips(monkeypatch):
