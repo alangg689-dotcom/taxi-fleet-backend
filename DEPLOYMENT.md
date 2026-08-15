@@ -9,20 +9,63 @@ Las rutas `../taxi-fleet-dashboard` y `../taxi-fleet-driver-app` son los otros
 dos repos, hermanos de este en la carpeta del proyecto — **no submódulos**:
 cada uno tiene su propio `.git` y se clona por separado.
 
-> **Antes de empezar, lo que NO puede salir así a producción.** Estos tres
-> puntos están sueltos hoy y cada uno es un agujero real, no un pendiente
-> cosmético:
->
-> 1. **`usesCleartextTraffic: true`** en `../taxi-fleet-driver-app/app.json`.
->    En un APK distribuido, la `device_key` de la unidad y el token del chofer
->    viajan en claro: cualquiera en el mismo wifi los lee, y son exactamente
->    las dos credenciales que permiten suplantar a una unidad y mandar
->    posiciones falsas. Se quita junto con el paso 3 (HTTPS), no antes — sin
->    HTTPS la app deja de conectar.
-> 2. **`JWT_SECRET`** debe ser un valor nuevo y largo en el servidor. El del
->    `.env.example` es de desarrollo; con él, cualquiera firma tokens de admin.
-> 3. **`BOT_API_KEY`** vacía deja el endpoint de bots respondiendo 503 (estado
->    seguro). Genérala antes de levantar el bot, no después.
+> **Antes de empezar.** Tres cosas que hay que resolver en el servidor y que
+> ningún despliegue debería saltarse.
+
+---
+
+## 0. Variables de entorno del backend
+
+Todas viven en el `.env` del servidor, que **está en `.gitignore` y nunca se
+commitea**. `.env.example` documenta cada variable pero con valores de relleno:
+copiarlo tal cual a producción es dejar el sistema abierto.
+
+> **Este repositorio es público.** Ningún valor real —secreto, token, cadena de
+> conexión— se escribe en este archivo ni en ningún otro versionado. Aquí solo
+> están los comandos para generarlos; el resultado va directo al `.env` del
+> servidor.
+
+### `JWT_SECRET` — firma los tokens de sesión
+
+Con este valor se firman los access tokens de operadores y choferes. Quien lo
+tenga puede fabricar un token de admin y entrar como quien quiera: no es "una
+contraseña más", es la llave maestra del sistema.
+
+Genera uno **nuevo para producción**, distinto del de desarrollo:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+```
+
+```bash
+# .env del servidor — nunca en git
+JWT_SECRET=<el valor que acaba de imprimir el comando>
+```
+
+Rotarlo invalida todas las sesiones vivas: los operadores tienen que volver a
+entrar y los choferes vuelven a capturar su PIN. Hazlo en un cambio de turno,
+no a media jornada.
+
+### `BOT_API_KEY` — protege la puerta de los bots
+
+`POST /bot/request-ride` crea viajes reales sin sesión de operador ni de
+chofer. Abierto, cualquiera llenaría la flotilla de servicios fantasma.
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+El mismo valor va en **dos lugares**: el `.env` del backend y el entorno del
+proceso del bot, que lo manda en la cabecera `X-Bot-Key`. Si no coinciden, el
+backend responde 401 a todo.
+
+Vacía, el endpoint responde **503** y el canal queda apagado — es el estado
+seguro por diseño, nunca "abierto a todos". Genérala antes de levantar el bot.
+
+### `TWILIO_*` — WhatsApp
+
+Ver la sección 6. El `AUTH_TOKEN` de Twilio permite mandar mensajes cobrados a
+tu cuenta: mismo trato que el `JWT_SECRET`.
 
 ---
 
@@ -258,7 +301,23 @@ Antes de compilar:
   entorno de EAS, no en el `.env` local — el `.env` está en `.gitignore` y EAS
   compila desde git, así que no llega al servidor de build. Cada perfil declara
   su `environment` en `eas.json`.
-- **Quitar `usesCleartextTraffic`** de `app.json`.
+- **`usesCleartextTraffic` en `false`** (plugin `expo-build-properties` de
+  `app.json`). **Ya está así en el repo y en producción debe quedarse así.**
+  En `true`, la `device_key` de la unidad y el access token del chofer viajan
+  en claro por la red: cualquiera en el mismo wifi los lee, y son exactamente
+  las dos credenciales que permiten suplantar a una unidad y mandar posiciones
+  falsas a la operadora.
+
+> **Consecuencia para el desarrollo local.** Con `false`, un APK compilado
+> **no puede** hablarle a un backend por `http://` — ni siquiera a la IP de tu
+> computadora en la red local. Android bloquea la conexión y la app aparenta
+> estar sin señal.
+>
+> Para probar en un teléfono real antes de tener HTTPS hay dos caminos: usar un
+> *development build* con el servidor de Expo, o ponerlo en `true`
+> temporalmente, compilar, probar, y **regresarlo a `false` antes de
+> commitear**. Lo que no debe pasar es que un APK que se reparte a los choferes
+> salga con `true`.
 - **Credenciales FCM V1** cargadas en el proyecto de EAS
   (`eas credentials -p android` → Google Service Account → FCM V1). Sin eso el
   push compila pero no llega nada, y es la causa número uno de "las
