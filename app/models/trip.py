@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geography
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, SmallInteger, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,10 +48,19 @@ class Trip(Base):
     origin_address: Mapped[str | None] = mapped_column(String(255))
     destination_address: Mapped[str | None] = mapped_column(String(255))
 
-    # Solo se llena en viajes que nacieron del bot de WhatsApp — es a dónde
-    # se le contesta con el estado del viaje (chofer asignado, etc). Un viaje
-    # de operador/dashboard no tiene cliente identificado, así que queda nulo.
+    # Los tres solo se llenan en viajes que nacieron de un bot de cliente — es
+    # a dónde se le contesta con el estado del viaje (chofer asignado, llegada,
+    # etc). Un viaje de operador/dashboard no tiene cliente identificado, así
+    # que quedan nulos.
+    #
+    # `customer_channel` decide por cuál de los dos leer: WhatsApp identifica
+    # al cliente por teléfono y Telegram por chat_id. No se unificaron en una
+    # sola columna a propósito — el teléfono sigue siendo dato útil por sí
+    # mismo (la operadora puede marcarle), el chat_id no le sirve a nadie
+    # fuera del bot.
+    customer_channel: Mapped[str | None] = mapped_column(String(16), index=True)
     customer_phone: Mapped[str | None] = mapped_column(String(32))
+    customer_chat_id: Mapped[str | None] = mapped_column(String(64))
 
     status: Mapped[TripStatus] = mapped_column(
         Enum(TripStatus, name="trip_status", values_callable=lambda e: [m.value for m in e]),
@@ -69,3 +78,7 @@ class Trip(Base):
     # este proyecto. Sirve para que el chofer lleve su propio registro de
     # ingresos, no para facturar al pasajero.
     fare: Mapped[float | None] = mapped_column(Float)
+    # Calificación del cliente (1-5), capturada por el bot al terminar el
+    # viaje. Nula si no contestó — calificar es opcional y no se insiste.
+    # El CHECK de rango vive en la base (migración 0014).
+    rating: Mapped[int | None] = mapped_column(SmallInteger)

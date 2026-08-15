@@ -30,6 +30,7 @@ cubrirlo end-to-end pese al costo de manejar el engine real (ver
 from datetime import UTC, datetime, timedelta
 
 from app.api.location import _point
+from app.config import settings
 from app.core.dispatch import dispatch_trip, find_candidate_drivers
 from app.database import SessionLocal, engine
 from app.models import StandQueue, StandQueueStatus, Trip, TripStatus, UserRole, VehicleStatus
@@ -282,6 +283,88 @@ async def test_tier4_offers_other_stands_head_when_own_zone_has_nothing(db_sessi
     candidates = await find_candidate_drivers(db_session, trip.id)
     assert [c.vehicle_id for c in candidates] == [other_vehicle.id]
     assert empty_stand is not None  # el sitio de la zona existe, solo no tiene a nadie
+
+
+# --- Guardas de los escalones de fila (regresión de doble asignación) --------
+#
+# Los escalones 1 y 4 salen de `stand_queue` y durante mucho tiempo no
+# filtraron nada más: bastaba con estar `formado`. La consulta de los
+# escalones 2 y 3 sí traía las guardas. El resultado medido en
+# scripts.sim_tiempo_real fue que ~20 % de los viajes automáticos se
+# asignaban a una unidad que ya traía otro encima.
+
+
+async def _cabeza_de_fila(db_session, *, status=VehicleStatus.DISPONIBLE, ping_age_s=0):
+    """Un sitio en el origen con una sola unidad formada al frente."""
+    stand = await make_stand(db_session, center=_ORIGIN)
+    vehicle = await make_vehicle(db_session, status=status, stand_id=stand.id)
+    driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    await _formar(db_session, stand=stand, vehicle=vehicle, driver=driver)
+    await make_location_ping(
+        db_session, vehicle_id=vehicle.id,
+        timestamp=datetime.now(UTC) - timedelta(seconds=ping_age_s),
+        lat=_ORIGIN[0], lng=_ORIGIN[1],
+    )
+    return stand, vehicle, driver
+
+
+async def test_head_of_queue_with_active_trip_is_not_offered_again(db_session):
+    """Ya trae un viaje encima: no puede volver a salir como candidata
+    aunque su renglón de fila siga en `formado`."""
+    _, vehicle, driver = await _cabeza_de_fila(db_session)
+    await _make_trip(
+        db_session, status=TripStatus.ASIGNADO, vehicle_id=vehicle.id, driver_id=driver.id
+    )
+
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+    assert await find_candidate_drivers(db_session, trip.id) == []
+
+
+async def test_head_of_queue_with_live_offer_is_not_offered_again(db_session):
+    """La carrera real: durante la ventana de oferta el viaje todavía tiene
+    vehicle_id NULO, así que solo `offered_vehicle_id` delata que esa unidad
+    ya está comprometida. Sin esta guarda, dos dispatch_trip simultáneos le
+    ofrecen dos viajes a la misma unidad."""
+    _, vehicle, driver = await _cabeza_de_fila(db_session)
+    await _make_trip(
+        db_session, status=TripStatus.SOLICITADO,
+        offered_vehicle_id=vehicle.id, offered_driver_id=driver.id,
+        offer_expires_at=datetime.now(UTC) + timedelta(seconds=25),
+    )
+
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+    assert await find_candidate_drivers(db_session, trip.id) == []
+
+
+async def test_head_of_queue_with_expired_offer_is_offered_again(db_session):
+    """La guarda de arriba no debe dejar pegada a una unidad cuya oferta ya
+    venció sin que nadie la limpiara."""
+    _, vehicle, driver = await _cabeza_de_fila(db_session)
+    await _make_trip(
+        db_session, status=TripStatus.SOLICITADO,
+        offered_vehicle_id=vehicle.id, offered_driver_id=driver.id,
+        offer_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+    assert [c.vehicle_id for c in await find_candidate_drivers(db_session, trip.id)] == [vehicle.id]
+
+
+async def test_head_of_queue_not_disponible_is_skipped(db_session):
+    """Se puso offline sin salirse de la fila (nada borra el renglón por
+    cambiar de status): no debe recibir ofertas."""
+    await _cabeza_de_fila(db_session, status=VehicleStatus.OFFLINE)
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+    assert await find_candidate_drivers(db_session, trip.id) == []
+
+
+async def test_head_of_queue_with_stale_ping_is_skipped(db_session):
+    """Misma frescura que exigen los escalones 2 y 3: una formada que lleva
+    más de DISPATCH_POSITION_FRESHNESS_SECONDS sin reportar no es candidata."""
+    await _cabeza_de_fila(db_session, ping_age_s=settings.DISPATCH_POSITION_FRESHNESS_SECONDS + 60)
+    trip = await _make_trip(db_session, origin=_ORIGIN)
+    assert await find_candidate_drivers(db_session, trip.id) == []
 
 
 # --- POST /trips/dispatch ----------------------------------------------------

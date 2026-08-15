@@ -1,6 +1,7 @@
 """Importa todos los modelos para que Alembic los detecte en el metadata."""
 
 from app.models.enums import (
+    CustomerChannel,
     DriverStatus,
     PermissionLevel,
     StandQueueStatus,
@@ -15,6 +16,7 @@ from app.models.user import Driver, Operator, RefreshToken, User
 from app.models.vehicle import Vehicle, VehicleAssignment
 
 __all__ = [
+    "CustomerChannel",
     "Driver",
     "DriverStatus",
     "LocationPing",

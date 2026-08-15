@@ -27,7 +27,7 @@ async def _dispatch(client, headers, vehicle_id, driver_id, **extra):
 
 async def test_create_trip_round_trips_coordinates(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, _ = await make_driver(db_session)
     headers = auth_headers(operator_token)
 
@@ -54,7 +54,7 @@ async def test_create_trip_round_trips_coordinates(client, db_session):
 
 async def test_create_trip_without_destination(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, _ = await make_driver(db_session)
 
     response = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
@@ -67,7 +67,7 @@ async def test_create_trip_without_destination(client, db_session):
 
 async def test_cannot_dispatch_same_vehicle_twice(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver_one, _ = await make_driver(db_session)
     driver_two, _ = await make_driver(db_session)
     headers = auth_headers(operator_token)
@@ -87,14 +87,14 @@ async def test_create_trip_unknown_vehicle_or_driver_is_404(client, db_session):
     missing_vehicle = await _dispatch(client, headers, uuid.uuid4(), driver.id)
     assert missing_vehicle.status_code == 404
 
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     missing_driver = await _dispatch(client, headers, vehicle.id, uuid.uuid4())
     assert missing_driver.status_code == 404
 
 
 async def test_driver_cannot_see_another_drivers_trip(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     owner, _owner_token = await make_driver(db_session)
     _, other_driver_token = await make_driver(db_session)
 
@@ -116,7 +116,7 @@ async def test_driver_can_see_trip_only_offered_to_them(client, db_session):
     from app.api.location import _point
     from app.models import Trip, TripStatus
 
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, driver_token = await make_driver(db_session)
     _, other_driver_token = await make_driver(db_session)
 
@@ -143,7 +143,7 @@ async def test_driver_can_see_trip_only_offered_to_them(client, db_session):
 
 async def test_full_lifecycle_accept_start_complete(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, driver_token = await make_driver(db_session)
     driver_headers = auth_headers(driver_token)
 
@@ -204,6 +204,60 @@ async def _queue_row(db_session, vehicle_id, status: StandQueueStatus) -> StandQ
     return result.scalar_one_or_none()
 
 
+async def test_manual_trip_rejects_offline_vehicle(client, db_session):
+    """No hay caso de uso válido para darle trabajo a una unidad que no está
+    operando, y el estado que quedaba era peor que el rechazo: el viaje se
+    creaba pero set_vehicle_status no toca `offline`, así que nadie lo movía."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.OFFLINE)
+    driver, _ = await make_driver(db_session)
+
+    response = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "La unidad no está disponible para recibir viajes"
+
+
+async def test_manual_trip_rejects_vehicle_in_maintenance(client, db_session):
+    """Mismo corte para `mantenimiento`: también es decisión exclusiva del
+    operador y tampoco lo pisa el ciclo de vida del viaje."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.MANTENIMIENTO)
+    driver, _ = await make_driver(db_session)
+
+    response = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "La unidad no está disponible para recibir viajes"
+
+
+async def test_manual_trip_marks_vehicle_busy_and_freezes_queue_on_creation(client, db_session):
+    """El alta manual compromete la unidad desde que se crea el viaje, no
+    hasta que el chofer acepta: el operador ya la eligió.
+
+    Antes este endpoint no llamaba a set_vehicle_status, así que la unidad
+    seguía `disponible` y su renglón de fila seguía `formado` — el dashboard
+    la mostraba formada mientras llevaba pasajero."""
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+    stand = await make_stand(db_session, center=(19.4326, -99.1332))
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE, stand_id=stand.id)
+    driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    db_session.add(
+        StandQueue(stand_id=stand.id, vehicle_id=vehicle.id, driver_id=driver.id,
+                   status=StandQueueStatus.FORMADO)
+    )
+    await db_session.flush()
+
+    response = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
+    assert response.status_code == 201
+
+    await db_session.refresh(vehicle)
+    assert vehicle.status is VehicleStatus.OCUPADO
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.FORMADO) is None
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.ASIGNADO) is not None
+
+
 async def test_accepting_trip_freezes_formado_entry_as_asignado(client, db_session):
     """Sección 8 de la spec ("Compensación"): aceptar un viaje no borra el
     lugar en la fila de una unidad formada, lo congela — desaparecería la
@@ -251,9 +305,14 @@ async def test_completing_trip_in_own_zone_leaves_queue_without_reinserting(clie
     assert left is None  # ya se movió a "salio", no se quedó pegada en asignado
 
 
-async def test_completing_trip_in_other_zone_reinserts_with_held_position(client, db_session):
-    """Escalón 4: la sacaron de su propia fila para un viaje de otra zona —
-    al terminar, reingresa YA conservando su lugar original, no al final."""
+async def test_completing_trip_in_other_zone_also_leaves_the_queue(client, db_session):
+    """Escalón 4: la sacaron de su propia fila para un viaje de otra zona.
+    Al terminar sale de la fila igual que si el viaje hubiera sido de su
+    propia zona — ya NO reingresa con el lugar conservado.
+
+    La compensación (position_held) se quitó: reingresaba con la unidad a
+    kilómetros de su sitio y la dejaba de cabeza de fila recién terminado un
+    viaje. Ver el docstring de app.core.stands.handle_vehicle_freed."""
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     home_stand = await make_stand(db_session, center=(19.4326, -99.1332))
     other_stand = await make_stand(db_session, center=(19.0, -98.5))  # zona del viaje
@@ -279,11 +338,13 @@ async def test_completing_trip_in_other_zone_reinserts_with_held_position(client
     await client.post(f"/api/v1/trips/{trip_id}/start", headers=driver_headers)
     await client.post(f"/api/v1/trips/{trip_id}/complete", headers=driver_headers)
 
-    reinserted = await _queue_row(db_session, vehicle.id, StandQueueStatus.FORMADO)
-    assert reinserted is not None
-    assert reinserted.stand_id == home_stand.id
-    assert reinserted.position_held is True
-    assert reinserted.entered_at == original_entered_at
+    # No hay reingreso: se vuelve a formar sola cuando regrese al polígono.
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.FORMADO) is None
+    assert await _queue_row(db_session, vehicle.id, StandQueueStatus.ASIGNADO) is None
+    left = await _queue_row(db_session, vehicle.id, StandQueueStatus.SALIO)
+    assert left is not None
+    assert left.left_reason == "completed_other_zone"
+    assert left.entered_at == original_entered_at  # el renglón viejo no se toca
     assert other_stand is not None  # la zona del viaje, solo para que quede claro en la prueba
 
 
@@ -291,7 +352,7 @@ async def test_complete_without_fare_leaves_it_null(client, db_session):
     """`fare` es opcional: no todos los operadores van a querer llevar este
     registro."""
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, driver_token = await make_driver(db_session)
     driver_headers = auth_headers(driver_token)
 
@@ -324,13 +385,20 @@ async def test_cancel_frees_vehicle_marked_ocupado(client, db_session):
 
 
 async def test_accept_does_not_touch_vehicle_in_mantenimiento(client, db_session):
-    """_set_vehicle_status no debe pisar un estado que decidió un operador."""
-    vehicle = await make_vehicle(db_session, status=VehicleStatus.MANTENIMIENTO)
+    """set_vehicle_status no debe pisar un estado que decidió un operador.
+
+    La unidad entra a mantenimiento DESPUÉS de crearse el viaje: desde que
+    POST /trips valida el status, ya no se puede dar de alta un viaje a una
+    unidad que no está operando (ver test_manual_trip_rejects_*)."""
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, driver_token = await make_driver(db_session)
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
 
     created = await _dispatch(client, auth_headers(operator_token), vehicle.id, driver.id)
     trip_id = created.json()["id"]
+
+    vehicle.status = VehicleStatus.MANTENIMIENTO
+    await db_session.flush()
 
     await client.post(f"/api/v1/trips/{trip_id}/accept", headers=auth_headers(driver_token))
     await db_session.refresh(vehicle)
@@ -339,7 +407,7 @@ async def test_accept_does_not_touch_vehicle_in_mantenimiento(client, db_session
 
 async def test_cannot_skip_states_out_of_order(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, driver_token = await make_driver(db_session)
     driver_headers = auth_headers(driver_token)
 
@@ -355,7 +423,7 @@ async def test_cannot_skip_states_out_of_order(client, db_session):
 
 async def test_cancel_trip_then_cancel_again_conflicts(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver, _ = await make_driver(db_session)
     headers = auth_headers(operator_token)
 
@@ -372,7 +440,7 @@ async def test_cancel_trip_then_cancel_again_conflicts(client, db_session):
 
 async def test_cancelling_a_trip_frees_the_vehicle_for_redispatch(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver_one, _ = await make_driver(db_session)
     driver_two, _ = await make_driver(db_session)
     headers = auth_headers(operator_token)
@@ -389,11 +457,11 @@ async def test_list_trips_filters_by_status(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     headers = auth_headers(operator_token)
 
-    vehicle_a = await make_vehicle(db_session)
+    vehicle_a = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver_a, _ = await make_driver(db_session)
     trip_a = (await _dispatch(client, headers, vehicle_a.id, driver_a.id)).json()
 
-    vehicle_b = await make_vehicle(db_session)
+    vehicle_b = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     driver_b, _ = await make_driver(db_session)
     trip_b_resp = await _dispatch(client, headers, vehicle_b.id, driver_b.id)
     trip_b_id = trip_b_resp.json()["id"]
@@ -416,13 +484,13 @@ async def test_driver_lists_only_their_own_trips(client, db_session):
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     operator_headers = auth_headers(operator_token)
 
-    vehicle_a = await make_vehicle(db_session)
+    vehicle_a = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     owner, owner_token = await make_driver(db_session)
     own_trip = (
         await _dispatch(client, operator_headers, vehicle_a.id, owner.id)
     ).json()
 
-    vehicle_b = await make_vehicle(db_session)
+    vehicle_b = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     other_driver, _ = await make_driver(db_session)
     other_trip = (
         await _dispatch(client, operator_headers, vehicle_b.id, other_driver.id)
@@ -441,7 +509,7 @@ async def test_driver_cannot_use_driver_id_filter_to_see_others_trips(client, db
     _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
     operator_headers = auth_headers(operator_token)
 
-    vehicle = await make_vehicle(db_session)
+    vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
     _, requester_token = await make_driver(db_session)
     other_driver, _ = await make_driver(db_session)
     other_trip = (
@@ -471,7 +539,7 @@ async def test_list_trips_paginates_with_total_count_header(client, db_session):
     headers = auth_headers(operator_token)
 
     for _ in range(5):
-        vehicle = await make_vehicle(db_session)
+        vehicle = await make_vehicle(db_session, status=VehicleStatus.DISPONIBLE)
         driver, _ = await make_driver(db_session)
         await _dispatch(client, headers, vehicle.id, driver.id)
 

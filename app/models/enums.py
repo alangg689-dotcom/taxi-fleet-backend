@@ -34,6 +34,19 @@ class TripStatus(str, enum.Enum):
     CANCELADO = "cancelado"
 
 
+class CustomerChannel(str, enum.Enum):
+    """Por dónde pidió el viaje el cliente, y por dónde hay que contestarle.
+
+    No es un enum nativo de Postgres como los demás: se guarda como texto
+    (ver la migración 20260811_2200_canal_del_cliente). Agregar un canal es
+    entonces desplegar código, no una migración de tipo — que es justo lo que
+    se quiere de una lista que va a crecer (Messenger, web, app del cliente).
+    """
+
+    WHATSAPP = "whatsapp"
+    TELEGRAM = "telegram"
+
+
 class StandQueueStatus(str, enum.Enum):
     """Estado persistido de un lugar en la fila de un sitio — no confundir
     con los sub-estados de la máquina (fuera/dentro/candidato), que son

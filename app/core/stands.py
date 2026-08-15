@@ -316,6 +316,12 @@ async def _sweep_signal_loss(db: AsyncSession) -> None:
                 await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "signal_lost")
                 await db.commit()
                 await redis_client.set(warned_key, "1", ex=settings.QUEUE_SIGNAL_DROP_SECONDS)
+                # El orden de la fila no cambia (la unidad conserva su lugar),
+                # pero el evento sí tiene que salir: era el único cambio de
+                # estado de fila que no se publicaba, y es justo el que le da
+                # a la operadora margen para actuar ANTES de que la unidad se
+                # caiga sola al cumplirse QUEUE_SIGNAL_DROP_SECONDS.
+                await _broadcast_queue(db, entry.stand_id, "signal_lost", entry.vehicle_id)
                 logger.warning(
                     "Unidad %s sin señal hace %.0fs en el sitio %s — conserva su lugar",
                     entry.vehicle_id, idle_seconds, entry.stand_id,
@@ -409,16 +415,26 @@ async def handle_vehicle_dispatched(db: AsyncSession, vehicle_id: uuid.UUID) -> 
 async def handle_vehicle_freed(db: AsyncSession, vehicle: Vehicle, trip_id: uuid.UUID) -> None:
     """Se llama cuando una unidad pasa a DISPONIBLE por completar/cancelar
     un viaje. Si tenía una fila ASIGNADA de antes (handle_vehicle_dispatched),
-    decide su destino según si el viaje era de su propia zona o de otra
-    (sección 8, "Compensación"):
-      - Propia zona (escalón 1: era la primera de su fila, la mandaron a
-        un viaje de su propio sitio): sale sin más — se vuelve a formar
-        sola cuando regrese físicamente al polígono, como cualquier otra
-        unidad, al final de la fila como corresponde.
-      - Otra zona (escalón 4: la sacaron de su fila para un viaje lejos de
-        su sitio): reingresa YA, conservando el lugar
-        (position_held=True, entered_at original) — no es justo que pierda
-        su turno por haber cubierto un viaje que no era el suyo.
+    SIEMPRE sale de ella: se vuelve a formar sola cuando regrese físicamente
+    al polígono, al final de la fila, como cualquier otra unidad.
+
+    Antes había una excepción (sección 8 de la spec, "Compensación"): si el
+    viaje era de otra zona, la unidad reingresaba de inmediato conservando su
+    lugar (position_held=True con el entered_at original). Se quitó por dos
+    razones, ambas medidas en scripts.sim_tiempo_real:
+
+      - Reingresaba con la unidad todavía lejísimos del sitio — se midieron
+        hasta 9.6 km. Como position_held ordena primero, quedaba de cabeza de
+        fila y por tanto candidata del escalón 1 para viajes que no podía
+        atender: el pasajero esperaba a alguien que venía del otro lado del
+        municipio.
+      - Regla de negocio de la operación: un turno que acaba de completar un
+        viaje (y de cobrarlo) no conserva el primer lugar frente a los que
+        llevan formados esperando.
+
+    La columna position_held y el ORDER BY que la usa se dejan en su lugar:
+    reorder_queue sigue apagándola y revertir esta decisión es volver a
+    escribirla aquí.
     """
     result = await db.execute(
         select(StandQueue).where(
@@ -430,35 +446,19 @@ async def handle_vehicle_freed(db: AsyncSession, vehicle: Vehicle, trip_id: uuid
         return
 
     zone_id = await nearest_stand_id_for_trip(db, trip_id)
-    entry.left_at = datetime.now(UTC)
-
-    if zone_id == entry.stand_id:
-        entry.status = StandQueueStatus.SALIO
-        entry.left_reason = "completed_trip"
-        await db.commit()
-        await _broadcast_queue(db, entry.stand_id, "completed_trip", entry.vehicle_id)
-        return
+    propia_zona = zone_id == entry.stand_id
 
     entry.status = StandQueueStatus.SALIO
-    entry.left_reason = "reassigned_other_zone"
-    # Flush antes del INSERT: el índice único parcial (un formado activo por
-    # unidad) necesita ver esta unidad ya "salio" antes de aceptar la fila
-    # nueva, o las dos filas formado chocan dentro de la misma transacción.
-    await db.flush()
-
-    db.add(
-        StandQueue(
-            stand_id=entry.stand_id,
-            vehicle_id=entry.vehicle_id,
-            driver_id=entry.driver_id,
-            status=StandQueueStatus.FORMADO,
-            position_held=True,
-            entered_at=entry.entered_at,
-        )
+    entry.left_at = datetime.now(UTC)
+    entry.left_reason = "completed_trip" if propia_zona else "completed_other_zone"
+    # Queda en la bitácora: "por qué perdí mi lugar" es exactamente el tipo de
+    # discusión para la que existe stand_queue_events.
+    await _log_event(
+        db, entry.vehicle_id, entry.driver_id, entry.stand_id,
+        "left_after_trip", {"zona_propia": propia_zona},
     )
-    await _log_event(db, entry.vehicle_id, entry.driver_id, entry.stand_id, "position_held")
     await db.commit()
-    await _broadcast_queue(db, entry.stand_id, "position_held", entry.vehicle_id)
+    await _broadcast_queue(db, entry.stand_id, entry.left_reason, entry.vehicle_id)
 
 
 # --- Consulta y broadcast de la fila (sección 9) ------------------------------

@@ -8,6 +8,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.enums import TripStatus
 
 
+class DemandOut(BaseModel):
+    """Presión de demanda del momento, para el panel de la operadora.
+
+    Trae los tres umbrales además de la lectura: así el dashboard colorea con
+    los mismos números que usa el servidor para rendirse, en vez de llevar
+    copias que se desincronizan en cuanto alguien toca una variable de entorno.
+    """
+
+    waiting_trips: int
+    available_drivers: int
+    high_demand: bool
+    # El que aplica ahora mismo — ya resuelto entre los dos de abajo.
+    max_wait_seconds: int
+    normal_wait_seconds: int
+    high_demand_wait_seconds: int
+
+
 def _check_destination_pair(lat: float | None, lng: float | None) -> None:
     if (lat is None) != (lng is None):
         raise ValueError("destination_lat y destination_lng deben ir juntos")

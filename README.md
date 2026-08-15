@@ -262,6 +262,64 @@ El estado de la conversación (`wa:conv:{phone}` → id del viaje activo) vive e
 
 Por ahora corre contra el **sandbox compartido de Twilio** (`TWILIO_WHATSAPP_FROM`, el número público `whatsapp:+14155238886`) — solo le contesta a números que se hayan unido al sandbox mandando el código que da Twilio. Pasar a un número de WhatsApp Business propio requiere aprobación de Meta y reemplazar ese número; también queda pendiente validar la firma `X-Twilio-Signature` del webhook (mientras se prueba en el sandbox compartido no hay nada sensible que proteger todavía).
 
+## Bot de Telegram
+
+Mismo motor de despacho, otra puerta. A diferencia de WhatsApp —donde Twilio manda la conversación cruda al webhook y `app.core.whatsapp_bot` la interpreta— aquí la conversación vive **fuera** del backend, en `bot/telegram_bot.py`, un proceso aparte que solo llama a la API cuando ya tiene una ubicación.
+
+```
+cliente toca "📍 Enviar mi ubicación"
+        │
+        ▼
+bot/telegram_bot.py ──POST /bot/request-ride (X-Bot-Key)──> crea Trip + dispatch_trip()
+        │                                                     202 {trip_id, status, already_active}
+        ▼
+   "buscando taxi…"
+                          chofer acepta ─────> app/core/telegram.py ──> "unidad X va en camino"
+                          unidad a <30 m ────> app/core/arrival.py  ──> "¡tu taxi ya llegó!"
+                          se agota la espera ─> sweep_stuck_bot_trips ──> "no encontramos taxi"
+```
+
+**El tráfico va en un solo sentido por el proceso del bot.** Ese proceso atiende lo que *entra*; todo lo que *sale* hacia el cliente lo manda el backend directo a la Bot API con el mismo `TELEGRAM_BOT_TOKEN` (`app/core/telegram.py`), porque quien conoce esos eventos es el backend y no tendría forma de despertar al proceso del bot para pedírselo. Por eso el bot no sondea el estado del viaje.
+
+**Endpoints** (todos con header `X-Bot-Key`):
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `POST` | `/bot/request-ride` | Crea el viaje y lanza el despacho. `202`, no `201`: al contestar todavía no hay chofer |
+| `POST` | `/bot/cancel-ride` | El cliente se arrepiente; libera la unidad y su lugar en la fila |
+| `GET` | `/bot/trips/{id}/status` | Consulta puntual, para un bot que se reinició y perdió su estado |
+
+`BOT_API_KEY` no es opcional: ese endpoint crea viajes reales sin sesión de operador ni de chofer, así que abierto cualquiera podría llenar la flotilla de servicios fantasma. Con la variable vacía el endpoint contesta **503**, nunca queda abierto.
+
+Pedir dos veces seguidas devuelve el viaje que ya existe con `already_active: true` en vez de abrir otro — no es un `409` porque pedir taxi dos veces es lo que hace alguien impaciente parado en la calle.
+
+Levantarlo:
+
+```bash
+pip install -r bot/requirements.txt
+export TELEGRAM_BOT_TOKEN=...   # el mismo del .env del backend
+export BOT_API_KEY=...          # el mismo del .env del backend
+export BACKEND_API_URL=http://localhost:8000/api/v1
+python -m bot.telegram_bot
+```
+
+## Identidad del cliente: dos canales
+
+`trips.customer_channel` (`whatsapp` | `telegram`) decide en qué columna vive la identidad: `customer_phone` para WhatsApp, `customer_chat_id` para Telegram. No se unificaron a propósito — el teléfono le sirve a la operadora por sí solo (puede marcarle), el `chat_id` no le sirve a nadie fuera del bot.
+
+Nadie manda mensajes directo: todo pasa por `app.core.customer_notify.notify_customer(trip, texto)`, que enruta por canal. Con dos canales, repetir el `if` en cada punto de aviso garantizaba olvidarlo en alguno y dejar mudo a medio padrón.
+
+`customer_channel` es **texto, no un enum nativo** de Postgres, a diferencia del resto de los enums del proyecto: agregar un canal debe ser desplegar código, no un `ALTER TYPE` con su migración.
+
+## Aviso de llegada
+
+`app/core/arrival.py` cuelga del mismo camino que la evaluación de la fila: cada lote de pings dispara una comprobación en una `asyncio.create_task` aparte, para no meter otra consulta geoespacial en el camino caliente de `_persist_pings`.
+
+- Solo mira viajes en **`asignado`** (el chofer va en camino a recoger). En `en_curso` el pasajero ya va a bordo.
+- La distancia la calcula Postgres con `ST_DWithin` sobre `geography`, que ya trabaja en metros y usa el índice espacial de `trips.origin`. Radio: `TRIP_ARRIVAL_RADIUS_METERS` (30 m).
+- Solo usa el **último** ping elegible del lote: al vaciarse un buffer offline los anteriores son historia, y avisar "ya llegué" por una posición de hace diez minutos sería mentira.
+- Se avisa **una sola vez** por viaje, con un `SET NX` en Redis (`trip:arrived:{trip_id}`). La unidad sigue mandando pings mientras espera afuera; sin candado el cliente recibiría el aviso cada cinco segundos.
+
 ## Notas sobre el modelo de datos
 
 - **`VEHICLE_ASSIGNMENT` en vez de `current_driver_id`.** Una columna suelta pierde el historial en cuanto rota el segundo chofer. Con `started_at`/`ended_at` queda la trazabilidad completa de turnos; el chofer actual es la asignación con `ended_at IS NULL`. Un índice único parcial impide dos turnos abiertos en la misma unidad.
