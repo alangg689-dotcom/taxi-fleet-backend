@@ -50,7 +50,7 @@ _CANCEL_KEYWORDS = {"cancelar", "cancela", "cancel", "❌", "no"}
 _CONFIRM_KEYWORDS = {"si", "sí", "confirmar", "confirmo", "✅", "1", "ok"}
 
 _GREETING = (
-    "¡Hola! Soy el asistente de Los Tigres. Para pedir un taxi, comparte tu "
+    "¡Hola! Soy el asistente de Taxis CTM. Para pedir un taxi, comparte tu "
     "ubicación (el clip de adjuntar → Ubicación). "
     "Escribe *cancelar* en cualquier momento para cancelar."
 )
@@ -72,7 +72,7 @@ _GAVE_UP = (
     "Ya llevamos un rato buscando y no encontramos un taxi disponible cerca de ti. "
     "Escríbenos de nuevo cuando quieras intentarlo otra vez."
 )
-_RATING_THANKS = "¡Gracias por tu calificación! Nos ayuda a mejorar el servicio. 🐯"
+_RATING_THANKS = "¡Gracias por tu calificación! Nos ayuda a mejorar el servicio."
 _RATING_INVALID = "Para calificar tu viaje responde con un número del 1 al 5."
 
 
