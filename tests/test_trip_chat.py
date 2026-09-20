@@ -193,7 +193,9 @@ async def test_cannot_chat_before_assignment(client, db_session):
         json={"body": "voy"},
         headers=auth_headers(token),
     )
-    assert posted.status_code == 409
+    # Oferta viva, todavía no es el asignado: 403, no 409. El 409 se
+    # reserva para "eres el chofer pero el viaje ya no admite chat".
+    assert posted.status_code == 403
 
 
 async def test_cannot_chat_after_complete(client, db_session):

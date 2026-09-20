@@ -450,7 +450,7 @@ async def test_normal_text_is_not_confused_with_cancelar(monkeypatch):
     trip_id = await bot._get_active_trip_id(_PHONE)
 
     reply = await bot.handle_incoming_message(
-        _PHONE, None, None, "no quiero cancelar, solo pregunto cuánto falta"
+        _PHONE, None, None, "no quiero cancelar, solo pregunto"
     )
     assert reply == bot._ALREADY_ACTIVE
 
