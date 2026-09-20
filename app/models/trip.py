@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geography
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, SmallInteger, String, func
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -82,3 +82,35 @@ class Trip(Base):
     # viaje. Nula si no contestó — calificar es opcional y no se insiste.
     # El CHECK de rango vive en la base (migración 0014).
     rating: Mapped[int | None] = mapped_column(SmallInteger)
+
+
+class TripMessage(Base):
+    """Un mensaje del hilo cliente↔chofer de un viaje.
+
+    El hilo es el propio viaje: no hay tabla de threads. Solo se escribe
+    mientras el viaje está `asignado` o `en_curso` (lo impone
+    app.core.trip_chat, no un trigger). `sender` es texto a propósito —
+    ver TripMessageSender.
+    """
+
+    __tablename__ = "trip_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    trip_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("trips.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sender: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_trip_messages_trip_id_created_at", "trip_id", "created_at"),
+        # El CHECK de sender/body vive en la migración 0015; el índice
+        # compuesto es el que usa GET /trips/{id}/messages al paginar.
+    )

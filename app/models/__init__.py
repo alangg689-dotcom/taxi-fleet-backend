@@ -5,13 +5,14 @@ from app.models.enums import (
     DriverStatus,
     PermissionLevel,
     StandQueueStatus,
+    TripMessageSender,
     TripStatus,
     UserRole,
     VehicleStatus,
 )
 from app.models.stand import Stand, StandQueue, StandQueueEvent
 from app.models.telemetry import LocationPing
-from app.models.trip import Trip
+from app.models.trip import Trip, TripMessage
 from app.models.user import Driver, Operator, RefreshToken, User
 from app.models.vehicle import Vehicle, VehicleAssignment
 
@@ -28,6 +29,8 @@ __all__ = [
     "StandQueueEvent",
     "StandQueueStatus",
     "Trip",
+    "TripMessage",
+    "TripMessageSender",
     "TripStatus",
     "User",
     "UserRole",

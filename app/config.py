@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     BOT_RIDE_MAX_PER_WINDOW: int = 10
     BOT_RIDE_WINDOW_SECONDS: int = 300
 
+    # --- Chat cliente↔chofer (app.core.trip_chat) ---
+    # Techo POR LADO (cliente o chofer) y viaje, no compartido: el pasajero
+    # nervioso no debe gastar el presupuesto de respuesta del chofer.
+    # 12 en 5 min alcanza para coordinar una recogida; un script en bucle
+    # lo toca en segundos. Mismo contador atómico de Redis que login/pings.
+    CHAT_MAX_PER_WINDOW: int = 12
+    CHAT_WINDOW_SECONDS: int = 300
+
     # --- Sitios y fila de espera ---
     # Ver spec-sitios-y-fila-v2.md. Los defaults de sitio individual
     # (still_seconds, max_speed_kmh, buffer del polígono) viven como columnas

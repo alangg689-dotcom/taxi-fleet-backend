@@ -28,16 +28,38 @@ from app.core.demand import measure_demand
 from app.core.dispatch import dispatch_trip, set_vehicle_status
 from app.core.customer_notify import has_customer, notify_customer
 from app.core.redis_client import get_last_position
+from app.core.trip_chat import (
+    ChatClosed,
+    ChatNoCounterpart,
+    ChatRateLimited,
+    can_chat,
+    notify_customer_of_reply,
+    post_message,
+)
 from app.core.whatsapp_bot import prompt_rating
 from app.database import get_db
-from app.models import Driver, Trip, TripStatus, User, UserRole, Vehicle, VehicleAssignment, VehicleStatus
+from app.models import (
+    Driver,
+    Trip,
+    TripMessage,
+    TripMessageSender,
+    TripStatus,
+    User,
+    UserRole,
+    Vehicle,
+    VehicleAssignment,
+    VehicleStatus,
+)
 from app.schemas.trip import (
     DemandOut,
     TripComplete,
     TripCreate,
     TripDispatchCreate,
+    TripMessageCreate,
+    TripMessageOut,
     TripOut,
     TripStreetHailCreate,
+    TripThreadOut,
 )
 
 router = APIRouter(prefix="/trips", tags=["viajes"])
@@ -352,6 +374,119 @@ async def get_trip(
     return await _get_trip_out(db, trip_id)
 
 
+def _driver_can_reply(trip: Trip, driver: Driver | None) -> bool:
+    return (
+        driver is not None
+        and trip.driver_id == driver.id
+        and can_chat(trip)
+        and has_customer(trip)
+    )
+
+
+async def _own_driver_or_none(db: AsyncSession, user: User) -> Driver | None:
+    if user.role != UserRole.DRIVER:
+        return None
+    result = await db.execute(select(Driver).where(Driver.user_id == user.id))
+    return result.scalar_one_or_none()
+
+
+@router.get("/{trip_id}/messages", response_model=TripThreadOut)
+async def list_trip_messages(
+    response: Response,
+    trip_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_or_staff),
+):
+    """Hilo cliente↔chofer de este viaje.
+
+    Staff ve cualquiera (soporte). Un chofer solo el suyo — el mismo
+    criterio que GET /trips/{id}, incluyendo una oferta todavía viva
+    (no hay mensajes que ver ahí, pero la app puede abrir la pantalla
+    al aceptar). El total va en `X-Total-Count`, igual que el resto
+    de listados; el orden es cronológico (el chat se lee de arriba
+    hacia abajo).
+    """
+    trip = await _get_trip_or_404(db, trip_id)
+    await _authorize_trip(trip, user, db)
+    driver = await _own_driver_or_none(db, user)
+
+    total = await db.scalar(
+        select(func.count()).select_from(TripMessage).where(TripMessage.trip_id == trip.id)
+    )
+    response.headers["X-Total-Count"] = str(total or 0)
+
+    result = await db.execute(
+        select(TripMessage)
+        .where(TripMessage.trip_id == trip.id)
+        .order_by(TripMessage.created_at.asc(), TripMessage.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    messages = [TripMessageOut.model_validate(row) for row in result.scalars().all()]
+    return TripThreadOut(
+        trip_id=trip.id,
+        trip_status=trip.status,
+        can_reply=_driver_can_reply(trip, driver),
+        messages=messages,
+    )
+
+
+@router.post(
+    "/{trip_id}/messages",
+    response_model=TripMessageOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def send_trip_message(
+    trip_id: uuid.UUID,
+    payload: TripMessageCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(driver_or_staff),
+):
+    """El chofer asignado le escribe al pasajero. Sale por WhatsApp
+    (o Telegram) vía notify_customer, con prefijo para que no se
+    confunda con un aviso del bot.
+
+    Staff no responde por aquí: el cliente creería que le habla su
+    chofer. Soporte usa el dashboard / el teléfono.
+    """
+    trip = await _get_trip_or_404(db, trip_id)
+    driver = await _get_own_driver_or_403(db, user)
+    if trip.driver_id != driver.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No tienes acceso a este viaje")
+
+    try:
+        message = await post_message(db, trip, TripMessageSender.DRIVER, payload.body)
+    except ChatClosed:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Este viaje ya no está activo",
+        ) from None
+    except ChatNoCounterpart:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Este viaje no tiene un cliente al que escribirle",
+        ) from None
+    except ChatRateLimited as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    except ValueError as exc:
+        detail = (
+            "El mensaje es muy largo"
+            if str(exc) == "too_long"
+            else "El mensaje no puede ir vacío"
+        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from exc
+
+    # get_db commitea al terminar el request; avisamos ahora con el
+    # renglón ya flushed. Si Twilio falla, notify_customer traga el
+    # error — el mensaje quedó guardado y el cliente puede no verlo,
+    # pero el chofer no recibe un 500 que lo invite a reenviar y
+    # duplicar.
+    await notify_customer_of_reply(trip, message)
+    return TripMessageOut.model_validate(message)
+
+
 @router.post("/{trip_id}/accept", response_model=TripOut)
 async def accept_trip(
     trip_id: uuid.UUID,
@@ -426,7 +561,10 @@ async def _assigned_message(db: AsyncSession, trip: Trip) -> str:
             )
             eta = f" Llegará en unos {minutes} min."
 
-    return f"✅ ¡Taxi asignado! Conductor {who}.{eta} Te avisamos cuando llegue."
+    return (
+        f"✅ ¡Taxi asignado! Conductor {who}.{eta} Te avisamos cuando llegue. "
+        "Si necesitas escribirle, manda *chofer* o tu mensaje."
+    )
 
 
 @router.post("/{trip_id}/reject", response_model=TripOut)

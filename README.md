@@ -58,6 +58,7 @@ app/
 │   ├── ping_validation.py  validación del GPS antes de mover la fila
 │   ├── push.py             notificaciones push vía Expo
 │   ├── whatsapp_bot.py     bot de clientes y barrido de viajes atorados
+│   ├── trip_chat.py        hilo cliente↔chofer (intención, persistencia, avisos)
 │   ├── redis_client.py     cache de posiciones y pub/sub
 │   └── deps.py             guardas de autenticación y RBAC
 ├── api/                 routers REST
@@ -109,7 +110,7 @@ El diseño completo de sitios y fila está en [`spec-sitios-y-fila-v2.md`](spec-
 
 **Telemetría** — `POST /location/ping` · `GET /vehicles/locations` (snapshot de flota) · `GET /vehicles/{id}/location` · `GET /vehicles/nearby?lat=&lng=&radius=` · `GET /vehicles/{id}/history?since=&until=` (paginado, default 500/tope 2000 — ver nota abajo) · `GET /vehicles/{id}/history/summary?since=&until=` (posición promedio cada 5 min, para rangos largos)
 
-**Viajes** — `POST /trips` (alta manual: el operador ya eligió unidad + chofer) · `POST /trips/dispatch` (despacho automático — ver abajo) · `POST /trips/street-hail` (corte de calle: el chofer toma un pasaje directo, sin operador ni motor de despacho — nace ya "en_curso") · `GET /trips?status=&vehicle_id=&driver_id=` (paginado; staff ve toda la flota, un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `POST /trips/{id}/accept` · `POST /trips/{id}/reject` (solo tiene efecto en el flujo de despacho) · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
+**Viajes** — `POST /trips` (alta manual: el operador ya eligió unidad + chofer) · `POST /trips/dispatch` (despacho automático — ver abajo) · `POST /trips/street-hail` (corte de calle: el chofer toma un pasaje directo, sin operador ni motor de despacho — nace ya "en_curso") · `GET /trips?status=&vehicle_id=&driver_id=` (paginado; staff ve toda la flota, un chofer solo los suyos — `driver_id` se ignora si lo manda uno) · `GET /trips/{id}` · `GET /trips/{id}/messages` (hilo cliente↔chofer; ver abajo) · `POST /trips/{id}/messages` (respuesta del chofer, sale por WhatsApp) · `POST /trips/{id}/accept` · `POST /trips/{id}/reject` (solo tiene efecto en el flujo de despacho) · `POST /trips/{id}/start` · `POST /trips/{id}/complete` · `POST /trips/{id}/cancel`
 
 Los listados (`/vehicles`, `/drivers`, `/trips`) aceptan `limit` (default 50, máximo 200) y `offset`. `GET /vehicles/{id}/history` usa un default y un tope más altos (500/2000): con ~10-20 pings/segundo de toda la flota, un solo día de una unidad ya son varios miles de filas, y el tope de 200 de los demás listados lo haría inservible para su uso normal (dibujar una ruta completa). El total que coincide con los filtros —antes de aplicar `limit`/`offset`— va en el header de respuesta `X-Total-Count`, no en el cuerpo: así el JSON se queda como una lista plana y no rompe a nadie que ya lo consuma sin paginar. Ese header está expuesto por CORS (`Access-Control-Expose-Headers`) para que un dashboard en el navegador pueda leerlo con `fetch()`.
 
@@ -257,6 +258,67 @@ POST /whatsapp/webhook  ──Form (From, Body, Latitude, Longitude)──> hand
 **Un viaje del bot sin candidatos no se cancela.** Antes sí: `dispatch_trip` lo cancelaba en cuanto se rendía en la primera pasada, lo que le contestaba "no hay taxis" a alguien parado en la calle por una unidad que segundos después ya estaba libre. Ahora se queda en `solicitado` y `sweep_stuck_bot_trips` (`app.core.whatsapp_bot`, corre cada `BOT_TRIP_SWEEP_INTERVAL_SECONDS` desde el lifespan de `main.py`) lo vuelve a despachar mientras la flota cambia de disponibilidad. Solo se cancela —y ahí sí se le avisa al cliente— al llegar a `BOT_TRIP_MAX_WAIT_SECONDS` (20 min por default). El barrido salta los viajes con una oferta viva (`offer_expires_at` en el futuro) para no meterse a medio cascadeo de candidatos, y usa un lock en Redis (`wa:dispatch_retry:{trip_id}`, `SET NX`) para no relanzar `dispatch_trip` sobre un intento que sigue corriendo.
 
 El cliente puede escribir **`cancelar`** en cualquier momento: cancela el viaje, libera la unidad si ya tenía una asignada y limpia la conversación. Solo la palabra sola cuenta — un mensaje que la mencione de pasada ("no quiero cancelar, ¿cuánto falta?") no tumba el viaje.
+
+## Chat cliente↔chofer
+
+Cuando el viaje ya está `asignado` o `en_curso` (el caso fuerte es el chofer en camino al punto de recogida), el pasajero de WhatsApp puede escribirle al conductor y el conductor responde desde `taxi-fleet-driver-app`. No es un stack nuevo: el bot detecta la intención, el hilo vive en `trip_messages` (un renglón por mensaje, scoped al viaje), y el aviso al chofer sale por el mismo `/ws/driver` de las ofertas más un push de Expo.
+
+```
+cliente (WhatsApp) ──webhook──> handle_incoming_message
+        │                         │
+        │                         ├─ "chofer" / "dónde estás" / "estoy en la esquina"
+        │                         │     → stage chat + trip_messages (sender=customer)
+        │                         │     → PUBLISH driver:{id}:chat
+        │                         │     → Expo push (channelId trip-chat)
+        │                         │     → TwiML: "se lo mandamos a tu conductor"
+        │                         └─ "listo" → vuelve a stage active (el viaje sigue)
+        │
+chofer (app) ──GET  /trips/{id}/messages──> pinta el hilo
+             ──POST /trips/{id}/messages──> trip_messages (sender=driver)
+                                              └─ notify_customer → WhatsApp: "🚕 Mensaje de tu conductor: …"
+```
+
+**Detección de intención.** No todo texto con viaje activo se reenvía — eso convertiría un "ok" o un "sí" en spam al chofer. En `solicitado` se sigue contestando que ya hay un viaje (y si piden *chofer*, que todavía no hay a quién escribirle). En `asignado`/`en_curso`:
+
+- Palabras (`chofer`, `conductor`, `mensaje`, `hablarle`…) o frases de recogida (`dónde estás`, `cuánto falta`, `estoy en la esquina`, `te espero`…) abren el hilo.
+- `chofer` / `conductor` a secas solo abre, no se le manda esa palabra al chofer.
+- Una vez en stage `chat`, todo texto (o una ubicación compartida, convertida a `📍 Ubicación: lat, lng`) se reenvía, menos `listo`/`salir` (cierra el chat, no el viaje) y `cancelar` (sigue pidiendo confirmación).
+- El aviso de asignación ya le dice al cliente que puede escribir.
+
+**Seguridad.** Solo el `driver_id` asignado lee y responde; otro chofer recibe `403`. Sin cliente identificado (viaje de operador) el POST es `409`. Completado/cancelado cierra el hilo (`409`). Techo por lado y viaje: `CHAT_MAX_PER_WINDOW` en `CHAT_WINDOW_SECONDS` (default 12 / 5 min), mismo `incr_with_ttl` de login y pings — el pasajero nervioso no gasta el presupuesto de respuesta del chofer. Cuerpo máximo 500 caracteres.
+
+**Contrato para `taxi-fleet-driver-app`** (este repo no incluye esa app):
+
+WebSocket `/ws/driver` — además de `connected`, `trip_offer`, `queue_update` y `ack`:
+
+```json
+{
+  "type": "trip_chat",
+  "data": {
+    "trip_id": "<uuid>",
+    "message_id": "<uuid>",
+    "sender": "customer",
+    "body": "Estoy en la esquina de Reforma",
+    "created_at": "2026-09-20T05:12:00+00:00"
+  }
+}
+```
+
+Push Expo (si hay token en `POST /drivers/me/push-token`):
+
+- `title`: `Mensaje del pasajero`
+- `body`: el texto, recortado a 80 caracteres
+- `data`: `{ "type": "trip_chat", "trip_id": "...", "message_id": "..." }`
+- `channelId`: `trip-chat` (registrar el canal en Android si se quiere un sonido distinto al de `trip-offers`; si no existe, Expo usa el default)
+
+REST, con el JWT de chofer:
+
+| Método | Ruta | Notas |
+|---|---|---|
+| `GET` | `/trips/{id}/messages?limit=&offset=` | Orden cronológico. `X-Total-Count` igual que el resto de listados. Cuerpo: `{ trip_id, trip_status, can_reply, messages: [{ id, trip_id, sender, body, created_at }] }`. `can_reply` es la verdad del servidor (asignado/en curso, este chofer, hay cliente). Staff puede leer; no responder. |
+| `POST` | `/trips/{id}/messages` | `{ "body": "Ya voy, 2 minutos" }` → `201` el mensaje. Sale por WhatsApp. `403` si no es el asignado, `409` si el viaje no admite chat, `429` si se pasó el techo. |
+
+La app puede abrir el chat al tocar el push o al recibir `trip_chat` por el socket; no hace falta un endpoint aparte de "mis hilos abiertos" — el viaje activo ya lo tiene con `GET /trips`.
 
 El estado de la conversación (`wa:conv:{phone}` → id del viaje activo) vive en Redis con una hora de TTL — es solo para saber si ya hay un viaje en curso para ese número, no un historial de chat. Un viaje "ya no bloquea una solicitud nueva" cuando está completado o cancelado, sin más: ya no hay criterio de edad, porque un `solicitado` viejo ahora significa que el barrido lo sigue reintentando (y es el propio barrido quien lo cancela si se agota la espera), no que quedó huérfano.
 

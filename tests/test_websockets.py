@@ -22,7 +22,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.core import ping_throttle
-from app.core.redis_client import get_last_position, publish_trip_offer
+from app.core.redis_client import get_last_position, publish_trip_chat, publish_trip_offer
 from app.models import LocationPing, UserRole, VehicleStatus
 from app.ws import fleet as fleet_module
 from tests.factories import make_driver, make_open_assignment, make_staff_user, make_vehicle
@@ -133,6 +133,32 @@ async def test_driver_socket_receives_offer_published_right_after_connecting(
 
             offer = await asyncio.wait_for(ws.receive_json(), timeout=2)
             assert offer == {"type": "trip_offer", "data": {"trip_id": "abc123"}}
+
+
+async def test_driver_socket_receives_trip_chat_published_after_connecting(
+    ws_client_factory, db_session
+):
+    """El hilo del pasajero viaja por el mismo /ws/driver, en un canal
+    Redis aparte para no disfrazarse de trip_offer."""
+    vehicle, device_key = await make_vehicle(db_session, with_device_key=True)
+    driver, _ = await make_driver(db_session)
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+
+    payload = {
+        "trip_id": "abc123",
+        "message_id": "msg-1",
+        "sender": "customer",
+        "body": "Estoy en la esquina",
+    }
+
+    async with ws_client_factory() as ws_client:
+        async with aconnect_ws(f"/ws/driver?device_key={device_key}", ws_client) as ws:
+            await ws.receive_json()  # "connected"
+
+            await publish_trip_chat(str(driver.id), payload)
+
+            chat = await asyncio.wait_for(ws.receive_json(), timeout=2)
+            assert chat == {"type": "trip_chat", "data": payload}
 
 
 async def test_driver_socket_accepts_valid_device_key_and_persists_ping(

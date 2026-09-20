@@ -83,6 +83,45 @@ class TripComplete(BaseModel):
     fare: float | None = Field(None, ge=0)
 
 
+class TripMessageCreate(BaseModel):
+    """Respuesta del chofer al pasajero. El bot de WhatsApp no usa este
+    schema — entra por texto libre y lo normaliza app.core.trip_chat."""
+
+    body: str = Field(..., min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def _strip_not_empty(self) -> "TripMessageCreate":
+        self.body = self.body.strip()
+        if not self.body:
+            raise ValueError("El mensaje no puede ir vacío")
+        return self
+
+
+class TripMessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    trip_id: UUID
+    sender: str
+    body: str
+    created_at: datetime
+
+
+class TripThreadOut(BaseModel):
+    """Hilo completo de un viaje, para que la app pinte el chat de una.
+
+    `can_reply` es la verdad del servidor (viaje asignado/en curso y este
+    chofer es el asignado): la app no debe inventar si el input está
+    habilitado a partir del status del viaje, que puede haber cambiado
+    entre el GET del viaje y el del hilo.
+    """
+
+    trip_id: UUID
+    trip_status: TripStatus
+    can_reply: bool
+    messages: list[TripMessageOut]
+
+
 class TripOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

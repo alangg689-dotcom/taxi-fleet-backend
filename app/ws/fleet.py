@@ -33,7 +33,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.location import _broadcast_latest, _persist_pings
 from app.config import settings
 from app.core import ping_throttle
-from app.core.redis_client import driver_offer_channel, get_all_last_positions, redis_client
+from app.core.redis_client import (
+    driver_chat_channel,
+    driver_offer_channel,
+    get_all_last_positions,
+    redis_client,
+)
 from app.core.security import decode_access_token, hash_token
 from app.database import get_db
 from app.models import UserRole, Vehicle, VehicleAssignment, VehicleStatus
@@ -97,6 +102,28 @@ async def _forward_trip_offers(websocket: WebSocket, pubsub) -> None:
                 continue
             await websocket.send_text(
                 json.dumps({"type": "trip_offer", "data": json.loads(message["data"])})
+            )
+    except asyncio.CancelledError:
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            await pubsub.unsubscribe()
+            await pubsub.aclose()
+
+
+async def _forward_trip_chat(websocket: WebSocket, pubsub) -> None:
+    """Igual que _forward_trip_offers, para el hilo cliente↔chofer.
+
+    Canal aparte (`driver:{id}:chat`): si se publicara en el de ofertas,
+    este forwarder no aplica — el de ofertas envuelve todo como
+    `trip_offer` y la app del chofer lo trataría como un viaje nuevo.
+    """
+    try:
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            await websocket.send_text(
+                json.dumps({"type": "trip_chat", "data": json.loads(message["data"])})
             )
     except asyncio.CancelledError:
         raise
@@ -246,11 +273,16 @@ async def driver_socket(
     # así que no vale la pena suscribirse.
     offers_pubsub = None
     queue_pubsub = None
+    chat_pubsub = None
     if current_driver_id is not None:
         offers_pubsub = redis_client.pubsub()
         await offers_pubsub.subscribe(driver_offer_channel(str(current_driver_id)))
         queue_pubsub = redis_client.pubsub()
         await queue_pubsub.subscribe(settings.QUEUE_CHANNEL)
+        # Misma ventana que las ofertas: suscribirse ANTES de accept, o un
+        # mensaje del pasajero que caiga justo al conectar se pierde.
+        chat_pubsub = redis_client.pubsub()
+        await chat_pubsub.subscribe(driver_chat_channel(str(current_driver_id)))
 
     await websocket.accept()
     logger.info("Chofer conectado; unidad %s", vehicle.plate)
@@ -273,6 +305,7 @@ async def driver_socket(
 
     offers_task: asyncio.Task | None = None
     queue_task: asyncio.Task | None = None
+    chat_task: asyncio.Task | None = None
     try:
         if offers_pubsub is not None:
             offers_task = asyncio.create_task(_forward_trip_offers(websocket, offers_pubsub))
@@ -280,6 +313,8 @@ async def driver_socket(
             queue_task = asyncio.create_task(
                 _forward_queue_updates(websocket, queue_pubsub, str(vehicle.stand_id))
             )
+        if chat_pubsub is not None:
+            chat_task = asyncio.create_task(_forward_trip_chat(websocket, chat_pubsub))
 
         while True:
             raw = await websocket.receive_text()
@@ -350,3 +385,7 @@ async def driver_socket(
             queue_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await queue_task
+        if chat_task is not None:
+            chat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await chat_task

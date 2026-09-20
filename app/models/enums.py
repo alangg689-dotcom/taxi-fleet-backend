@@ -47,6 +47,18 @@ class CustomerChannel(str, enum.Enum):
     TELEGRAM = "telegram"
 
 
+class TripMessageSender(str, enum.Enum):
+    """Quién escribió un mensaje del hilo cliente↔chofer.
+
+    Texto en la base (no enum nativo), igual que `customer_channel`: el
+    CHECK de la migración 0015 acota los valores; agregar un emisor
+    (operadora, sistema) es desplegar código, no un ALTER TYPE.
+    """
+
+    CUSTOMER = "customer"
+    DRIVER = "driver"
+
+
 class StandQueueStatus(str, enum.Enum):
     """Estado persistido de un lugar en la fila de un sitio — no confundir
     con los sub-estados de la máquina (fuera/dentro/candidato), que son

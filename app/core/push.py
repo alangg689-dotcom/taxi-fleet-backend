@@ -22,11 +22,22 @@ _EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
 async def send_push_notification(
-    push_token: str, title: str, body: str, data: dict
+    push_token: str,
+    title: str,
+    body: str,
+    data: dict,
+    *,
+    channel_id: str = "trip-offers",
 ) -> None:
     """Un push es un complemento del WebSocket, no el camino principal del
     despacho — por eso nunca lanza: que Expo esté caído o rechace un token
-    vencido no debe tumbar el resto de dispatch_trip()."""
+    vencido no debe tumbar el resto de dispatch_trip().
+
+    `channel_id` es el canal de Android de Expo. Las ofertas siguen en
+    `trip-offers` (default); el chat usa `trip-chat` para que la app pueda
+    sonar distinto. Si la app aún no registró ese canal, Expo cae al
+    default del sistema — no se pierde el push.
+    """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -38,7 +49,7 @@ async def send_push_notification(
                     "data": data,
                     "sound": "default",
                     "priority": "high",
-                    "channelId": "trip-offers",
+                    "channelId": channel_id,
                 },
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
             )
