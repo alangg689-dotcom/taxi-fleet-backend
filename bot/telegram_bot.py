@@ -1,4 +1,4 @@
-"""Bot de Telegram para clientes de Los Tigres.
+"""Bot de Telegram para clientes de Taxis CTM.
 
 Proceso APARTE del backend: se ejecuta con `python -m bot.telegram_bot` y habla
 con la API por HTTP, igual que lo haría cualquier otro cliente. No importa nada
@@ -48,7 +48,7 @@ _CHANNEL = "telegram"
 _TIMEOUT_SECONDS = 15.0
 
 _GREETING = (
-    "¡Hola! Soy el asistente de Los Tigres 🐯\n\n"
+    "¡Hola! Soy el asistente de Taxis CTM.\n\n"
     "Para pedir un taxi, toca el botón *📍 Enviar mi ubicación* de aquí abajo. "
     "Buscamos la unidad más cercana y te avisamos por este chat en cuanto un "
     "chofer confirme.\n\n"

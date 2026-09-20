@@ -465,7 +465,7 @@ async def start_trip(
 
     if has_customer(trip):
         await notify_customer(
-            trip, "✅ El viaje ha comenzado. Gracias por viajar con Los Tigres."
+            trip, "✅ El viaje ha comenzado. Gracias por viajar con Taxis CTM."
         )
     return await _get_trip_out(db, trip_id)
 
@@ -494,12 +494,12 @@ async def complete_trip(
         await prompt_rating(trip)
         await notify_customer(
             trip,
-            "🎯 ¡Llegaste a tu destino! Gracias por viajar con Los Tigres. "
+            "🎯 ¡Llegaste a tu destino! Gracias por viajar con Taxis CTM. "
             "Califica tu viaje respondiendo con un número del 1 al 5.",
         )
     elif has_customer(trip):
         await notify_customer(
-            trip, "🎯 ¡Llegaste a tu destino! Gracias por viajar con Los Tigres."
+            trip, "🎯 ¡Llegaste a tu destino! Gracias por viajar con Taxis CTM."
         )
     return await _get_trip_out(db, trip_id)
 
