@@ -141,9 +141,7 @@ async def driver_set_pin(
     await _limit_set_pin(payload.folio_ctm)
 
     if payload.pin != payload.pin_confirm:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "El PIN y su confirmación no coinciden"
-        )
+        raise HTTPException(422, "El PIN y su confirmación no coinciden")
 
     user = await find_user_by_phone(db, payload.phone)
     driver = None
@@ -167,6 +165,7 @@ async def driver_set_pin(
 
     driver.pin_hash = hash_token(payload.pin)
     driver.must_set_pin = False
+    await db.flush()
     return MessageResponse(detail="PIN guardado")
 
 
@@ -180,10 +179,7 @@ async def driver_change_pin(
     await _limit_set_pin(payload.phone)
 
     if payload.new_pin != payload.new_pin_confirm:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "El PIN nuevo y su confirmación no coinciden",
-        )
+        raise HTTPException(422, "El PIN nuevo y su confirmación no coinciden")
 
     try:
         await login_throttle.check_not_locked(payload.phone)
@@ -210,6 +206,7 @@ async def driver_change_pin(
     await login_throttle.reset(payload.phone)
     driver.pin_hash = hash_token(payload.new_pin)
     driver.must_set_pin = False
+    await db.flush()
     return MessageResponse(detail="PIN actualizado")
 
 

@@ -153,6 +153,11 @@ async def _reset_redis_pool() -> AsyncGenerator[None, None]:
     conexión abierta en el loop de un test revienta si el siguiente test
     intenta reusarla en el suyo. Cerrar el pool al final de cada test fuerza
     una reconexión limpia en el loop del que sigue.
+
+    flushdb al empezar: los throttles (login, pings, autorregistro) viven en
+    Redis, no en el SAVEPOINT de Postgres, y sin esto un test de alta pública
+    hereda el contador de IP del anterior y cae en 429.
     """
+    await redis_client.flushdb()
     yield
     await redis_client.aclose()

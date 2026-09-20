@@ -99,7 +99,15 @@ async def test_happy_path_apply_approve_set_pin_login_bind(client, db_session):
     )
     assert set_pin.status_code == 200
 
-    await db_session.refresh(driver)
+    status_ready = await client.get(
+        "/api/v1/driver-applications/status",
+        params={"application_id": application_id},
+    )
+    assert status_ready.json()["must_set_pin"] is False
+
+    db_session.expire_all()
+    driver = await db_session.get(Driver, driver_id)
+    assert driver is not None
     assert driver.must_set_pin is False
     assert driver.pin_hash == hash_token("482910")
     assert driver.pin_hash != hash_token("CTM-045")
@@ -437,7 +445,8 @@ async def test_approve_associates_existing_vehicle_by_plate(client, db_session):
     )
     assert approved.status_code == 200
     assert approved.json()["vehicle_id"] == str(vehicle.id)
-    await db_session.refresh(vehicle)
+    # Misma sesión que el endpoint (el override de get_db no hace commit):
+    # el objeto del identity map es el que se mutó al aprobar.
     assert vehicle.folio_ctm == "CTM-045"
     assert vehicle.device_key_hash is None
 

@@ -177,10 +177,7 @@ async def upload_application_photo(
     """Sube foto de rostro o de licencia. No existe kind=union_card."""
     await _limit_uploads(request)
     if kind not in UPLOAD_KINDS:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "kind debe ser profile o license",
-        )
+        raise HTTPException(422, "kind debe ser profile o license")
     url = await save_image(file)
     return UploadCreated(url=url, kind=kind)  # type: ignore[arg-type]
 
@@ -393,6 +390,7 @@ async def _associate_or_create_vehicle(
 
     if vehicle.folio_ctm is None:
         vehicle.folio_ctm = application.folio_ctm
+    await db.flush()
     return vehicle
 
 
