@@ -37,8 +37,28 @@ from app.core.customer_notify import notify_customer
 from app.core.demand import customer_wait_message, measure_demand
 from app.core.dispatch import dispatch_trip, set_vehicle_status
 from app.core.redis_client import redis_client
+from app.core.trip_chat import (
+    ALREADY_ASSIGNED,
+    CHAT_CLOSED,
+    CHAT_ENDED,
+    CHAT_NEED_TEXT,
+    CHAT_NO_DRIVER,
+    CHAT_OPEN,
+    CHAT_RATE_LIMITED,
+    CHAT_SENT,
+    CHAT_SENT_FIRST,
+    CHAT_TOO_LONG,
+    ChatClosed,
+    ChatNoCounterpart,
+    ChatRateLimited,
+    is_chat_close,
+    is_chat_open_command_only,
+    notify_driver_of_message,
+    post_message,
+    wants_driver_chat,
+)
 from app.database import SessionLocal
-from app.models import CustomerChannel, Trip, TripStatus, VehicleStatus
+from app.models import CustomerChannel, Driver, Trip, TripMessageSender, TripStatus, VehicleStatus
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +79,9 @@ _ASK_DESTINATION = (
     "comparte otra ubicación o escríbelo con palabras (ej. \"Clínica 4\")."
 )
 _ALREADY_ACTIVE = "Ya tienes un viaje en curso. En cuanto haya novedades te avisamos por aquí."
+# Cuando ya hay chofer, el "ya tienes viaje" de arriba no alcanza: el
+# cliente quiere coordinar la recogida, no que le repitan que espere.
+_ALREADY_ASSIGNED = ALREADY_ASSIGNED
 # El texto de "buscando taxi" vive en app.core.demand.customer_wait_message:
 # depende de la presión de demanda del momento, no es una constante.
 _CANCELLED = "Viaje cancelado. Escríbenos cuando quieras pedir otro."
@@ -106,9 +129,44 @@ async def _set_state(phone: str, state: dict) -> None:
 
 async def _get_active_trip_id(phone: str) -> uuid.UUID | None:
     state = await _get_state(phone)
-    if state.get("stage") in ("active", "cancel_confirm") and state.get("trip_id"):
+    if state.get("stage") in ("active", "cancel_confirm", "chat") and state.get("trip_id"):
         return uuid.UUID(state["trip_id"])
     return None
+
+
+async def _set_chat_trip(phone: str, trip_id: uuid.UUID) -> None:
+    await _set_state(phone, {"stage": "chat", "trip_id": str(trip_id)})
+
+
+async def relay_customer_message(
+    trip_id: uuid.UUID, body: str, *, first: bool = False
+) -> str:
+    """Persiste el mensaje del pasajero y avisa al chofer. Devuelve el
+    texto que el webhook le contesta a Twilio — nunca lanza: un fallo
+    de Redis/Twilio no debe hacer que Twilio reintente el webhook y
+    duplique el mensaje."""
+    try:
+        async with SessionLocal() as db:
+            trip = await db.get(Trip, trip_id)
+            if trip is None:
+                return CHAT_ENDED
+            message = await post_message(db, trip, TripMessageSender.CUSTOMER, body)
+            driver = await db.get(Driver, trip.driver_id) if trip.driver_id else None
+            push_token = driver.push_token if driver is not None else None
+            await db.commit()
+        await notify_driver_of_message(trip, message, push_token=push_token)
+        return CHAT_SENT_FIRST if first else CHAT_SENT
+    except ChatClosed:
+        return CHAT_ENDED
+    except ChatNoCounterpart:
+        return CHAT_NO_DRIVER
+    except ChatRateLimited:
+        return CHAT_RATE_LIMITED
+    except ValueError as exc:
+        return CHAT_TOO_LONG if str(exc) == "too_long" else CHAT_NEED_TEXT
+    except Exception:
+        logger.error("Viaje %s: no se pudo reenviar el mensaje al chofer", trip_id, exc_info=True)
+        return "No pudimos entregarle el mensaje a tu conductor. Inténtalo de nuevo en un momento."
 
 
 async def _set_active_trip(phone: str, trip_id: uuid.UUID) -> None:
@@ -188,6 +246,10 @@ async def handle_incoming_message(
             return _CANCELLED
         # Cualquier otra cosa = se arrepintió de cancelar; el viaje sigue.
         await _set_active_trip(phone, trip_id)
+        async with SessionLocal() as db:
+            trip = await db.get(Trip, trip_id)
+        if trip is not None and trip.status in (TripStatus.ASIGNADO, TripStatus.EN_CURSO):
+            return _ALREADY_ASSIGNED
         return _ALREADY_ACTIVE
 
     # --- "cancelar" en cualquier otra etapa --------------------------------
@@ -208,12 +270,36 @@ async def handle_incoming_message(
         await _set_state(phone, {"stage": "cancel_confirm", "trip_id": str(trip_id)})
         return _CANCEL_CONFIRM
 
-    # --- Con viaje activo, cualquier mensaje repite el estado ---------------
+    # --- Chat con el chofer (viaje ya asignado / en curso) -----------------
+    if stage == "chat":
+        trip_id = uuid.UUID(state["trip_id"])
+        if is_chat_close(text):
+            await _set_active_trip(phone, trip_id)
+            return CHAT_CLOSED
+        message_body = (body or "").strip()
+        if not message_body and latitude is not None and longitude is not None:
+            message_body = f"📍 Ubicación: {latitude}, {longitude}"
+        if not message_body:
+            return CHAT_NEED_TEXT
+        return await relay_customer_message(trip_id, message_body)
+
+    # --- Con viaje activo: o se reenvía al chofer, o se recuerda el estado -
     if stage == "active":
         trip_id = uuid.UUID(state["trip_id"])
         async with SessionLocal() as db:
             trip = await db.get(Trip, trip_id)
         if await _trip_still_active(trip):
+            if trip.status in (TripStatus.ASIGNADO, TripStatus.EN_CURSO):
+                if wants_driver_chat(text):
+                    await _set_chat_trip(phone, trip_id)
+                    if is_chat_open_command_only(text):
+                        return CHAT_OPEN
+                    return await relay_customer_message(
+                        trip_id, (body or "").strip(), first=True
+                    )
+                return _ALREADY_ASSIGNED
+            if wants_driver_chat(text):
+                return CHAT_NO_DRIVER
             return _ALREADY_ACTIVE
         await _clear_active_trip(phone)
         state, stage = {}, None

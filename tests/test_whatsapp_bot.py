@@ -283,6 +283,163 @@ async def test_cancelar_without_active_trip_says_so():
     assert reply == bot._NOTHING_TO_CANCEL
 
 
+async def test_chofer_sin_asignar_no_abre_chat(monkeypatch):
+    """Pedir *chofer* mientras el viaje sigue 'solicitado' no debe
+    inventar un destinatario — todavía no hay a quién escribirle."""
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "chofer")
+    assert reply == bot.CHAT_NO_DRIVER
+    state = await bot._get_state(_PHONE)
+    assert state.get("stage") == "active"
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_chofer_abre_el_chat_sin_reenviar_la_palabra(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.ASIGNADO
+        await db.commit()
+
+    relayed = []
+
+    async def _fake_relay(trip_id, body, *, first=False):
+        relayed.append(body)
+        return "no-deberia-verse"
+
+    monkeypatch.setattr(bot, "relay_customer_message", _fake_relay)
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "chofer")
+    assert reply == bot.CHAT_OPEN
+    assert relayed == []
+    state = await bot._get_state(_PHONE)
+    assert state["stage"] == "chat"
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_frase_de_recogida_abre_y_reenvia(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.ASIGNADO
+        await db.commit()
+
+    relayed = []
+
+    async def _fake_relay(got_id, body, *, first=False):
+        relayed.append((got_id, body, first))
+        return bot.CHAT_SENT_FIRST
+
+    monkeypatch.setattr(bot, "relay_customer_message", _fake_relay)
+
+    reply = await bot.handle_incoming_message(
+        _PHONE, None, None, "estoy en la esquina de Reforma"
+    )
+    assert reply == bot.CHAT_SENT_FIRST
+    assert relayed == [(trip_id, "estoy en la esquina de Reforma", True)]
+    assert (await bot._get_state(_PHONE))["stage"] == "chat"
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_ok_con_viaje_asignado_no_se_reenvia(monkeypatch):
+    """Un 'ok' no es intención de hablar con el chofer — se le recuerda
+    que puede escribirle, sin spamear al conductor."""
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.ASIGNADO
+        await db.commit()
+
+    relayed = []
+
+    async def _fake_relay(*args, **kwargs):
+        relayed.append(args)
+        return "no"
+
+    monkeypatch.setattr(bot, "relay_customer_message", _fake_relay)
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "ok")
+    assert reply == bot._ALREADY_ASSIGNED
+    assert relayed == []
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_en_chat_reenvia_y_listo_cierra_sin_cancelar(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.ASIGNADO
+        await db.commit()
+    await bot._set_chat_trip(_PHONE, trip_id)
+
+    relayed = []
+
+    async def _fake_relay(got_id, body, *, first=False):
+        relayed.append(body)
+        return bot.CHAT_SENT
+
+    monkeypatch.setattr(bot, "relay_customer_message", _fake_relay)
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "voy con blusa roja")
+    assert reply == bot.CHAT_SENT
+    assert relayed == ["voy con blusa roja"]
+
+    closed = await bot.handle_incoming_message(_PHONE, None, None, "listo")
+    assert closed == bot.CHAT_CLOSED
+    assert (await bot._get_state(_PHONE))["stage"] == "active"
+    assert (await _fetch_trip(trip_id)).status == TripStatus.ASIGNADO
+
+    await _cleanup_trip(trip_id)
+
+
+async def test_cancelar_desde_el_chat_sigue_pidiendo_confirmacion(monkeypatch):
+    monkeypatch.setattr(bot, "dispatch_trip", _noop_dispatch)
+    _pin_demand(monkeypatch)
+
+    await _request_full_trip()
+    trip_id = await bot._get_active_trip_id(_PHONE)
+    async with SessionLocal() as db:
+        trip = await db.get(Trip, trip_id)
+        trip.status = TripStatus.ASIGNADO
+        await db.commit()
+    await bot._set_chat_trip(_PHONE, trip_id)
+
+    ask = await bot.handle_incoming_message(_PHONE, None, None, "cancelar")
+    assert "seguro" in ask.lower()
+    assert (await _fetch_trip(trip_id)).status == TripStatus.ASIGNADO
+
+    reply = await bot.handle_incoming_message(_PHONE, None, None, "sí")
+    assert reply == bot._CANCELLED
+    assert (await _fetch_trip(trip_id)).status == TripStatus.CANCELADO
+
+    await _cleanup_trip(trip_id)
+
+
 async def test_normal_text_is_not_confused_with_cancelar(monkeypatch):
     """Solo la palabra sola cancela — un mensaje que la mencione de pasada
     no debe tumbar el viaje de alguien que está esperando su taxi."""
@@ -293,7 +450,7 @@ async def test_normal_text_is_not_confused_with_cancelar(monkeypatch):
     trip_id = await bot._get_active_trip_id(_PHONE)
 
     reply = await bot.handle_incoming_message(
-        _PHONE, None, None, "no quiero cancelar, solo pregunto cuánto falta"
+        _PHONE, None, None, "no quiero cancelar, solo pregunto"
     )
     assert reply == bot._ALREADY_ACTIVE
 

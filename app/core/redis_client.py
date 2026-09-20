@@ -130,3 +130,18 @@ async def publish_trip_offer(driver_id: str, payload: dict) -> None:
     el motor de despacho puede correr en un servidor distinto al que tiene
     abierta la conexión de ese chofer)."""
     await redis_client.publish(driver_offer_channel(driver_id), json.dumps(payload, default=str))
+
+
+def driver_chat_channel(driver_id: str) -> str:
+    return f"driver:{driver_id}:chat"
+
+
+async def publish_trip_chat(driver_id: str, payload: dict) -> None:
+    """Empuja un mensaje del hilo cliente↔chofer al WebSocket del chofer.
+
+    Canal propio, no el de ofertas: `_forward_trip_offers` envuelve todo
+    como `trip_offer`, y un mensaje de chat no es una oferta. Mismo motivo
+    de Pub/Sub que publish_trip_offer — el bot puede correr en otra
+    instancia que la del socket del chofer.
+    """
+    await redis_client.publish(driver_chat_channel(driver_id), json.dumps(payload, default=str))
