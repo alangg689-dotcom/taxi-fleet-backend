@@ -9,7 +9,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, bot, drivers, location, stands, trips, vehicles, whatsapp
+from app.api import (
+    auth,
+    bot,
+    driver_applications,
+    driver_devices,
+    drivers,
+    location,
+    stands,
+    trips,
+    vehicles,
+    whatsapp,
+)
 from app.config import settings
 from app.core.redis_client import redis_client
 from app.core.stands import sweep_stand_queues
@@ -131,6 +142,9 @@ app.include_router(vehicles.router, prefix="/api/v1")
 app.include_router(stands.router, prefix="/api/v1")
 app.include_router(trips.router, prefix="/api/v1")
 app.include_router(drivers.router, prefix="/api/v1")
+app.include_router(driver_applications.router, prefix="/api/v1")
+app.include_router(driver_applications.uploads_public_router, prefix="/api/v1")
+app.include_router(driver_devices.router, prefix="/api/v1")
 app.include_router(whatsapp.router, prefix="/api/v1")
 app.include_router(bot.router, prefix="/api/v1")
 app.include_router(fleet.router)

@@ -1,6 +1,8 @@
 """Modelos de identidad: USER es la base de autenticación; DRIVER y OPERATOR
 son los perfiles operativos que cuelgan de ella."""
 
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
 
@@ -9,7 +11,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
-from app.models.enums import DriverStatus, PermissionLevel, UserRole
+from app.models.enums import DriverStatus, DriverUnitRole, PermissionLevel, UserRole
 
 
 class User(Base):
@@ -64,15 +66,31 @@ class Driver(Base):
     # cerrada). Se sobreescribe en cada registro; no hace falta soportar
     # varios dispositivos por chofer en una flotilla de este tamaño.
     push_token: Mapped[str | None] = mapped_column(String(255))
-    # Login del chofer: teléfono + PIN, asignado por el operador (ver
-    # POST /drivers y POST /drivers/{id}/pin) — reemplaza el OTP por SMS.
-    # Nulo mientras un chofer no tenga PIN asignado (no puede entrar hasta
-    # entonces, igual que "sin device_key" bloquea a una unidad).
+    # Login del chofer: teléfono + PIN. Tras autorregistro aprobado el
+    # chofer lo inventa (POST /auth/driver/set-pin); el operador ya no
+    # genera uno al aprobar. Nulo / must_set_pin=true = no puede entrar.
     pin_hash: Mapped[str | None] = mapped_column(String(255))
+    must_set_pin: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
+    # ID operativo de la unidad (ej. CTM-045). Visible; varios choferes
+    # (titular / turno) pueden compartir el mismo. NO es el numeral de
+    # radio (R18) ni un secreto de login.
+    folio_ctm: Mapped[str | None] = mapped_column(String(20), index=True)
+    unit_role: Mapped[DriverUnitRole | None] = mapped_column(
+        Enum(
+            DriverUnitRole,
+            name="driver_unit_role",
+            values_callable=lambda e: [m.value for m in e],
+        )
+    )
 
     user: Mapped["User"] = relationship(back_populates="driver")
     assignments: Mapped[list["VehicleAssignment"]] = relationship(
         back_populates="driver"
+    )
+    devices: Mapped[list["DriverDevice"]] = relationship(
+        "DriverDevice", back_populates="driver", cascade="all, delete-orphan"
     )
 
     __table_args__ = (

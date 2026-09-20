@@ -2,10 +2,24 @@
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.core.phone import InvalidPhoneError, normalize_mx_phone
+
 
 class DriverLoginRequest(BaseModel):
-    phone: str = Field(..., min_length=10, max_length=20, examples=["+525512345678"])
+    phone: str = Field(..., min_length=10, max_length=20, examples=["6621234567"])
     pin: str = Field(..., min_length=4, max_length=8)
+
+    @field_validator("phone")
+    @classmethod
+    def _normalize_phone(cls, value: str) -> str:
+        """Acepta 10 dígitos o +52… y compara contra ambos en el login.
+        Si el formato no es un móvil MX, se deja pasar para que el login
+        responda el mismo 401 genérico (no delatar el formato)."""
+        try:
+            normalized = normalize_mx_phone(value)
+        except InvalidPhoneError:
+            return value.strip()
+        return normalized or value.strip()
 
 
 class LoginRequest(BaseModel):

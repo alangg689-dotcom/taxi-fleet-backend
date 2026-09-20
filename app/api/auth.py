@@ -17,8 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core import login_throttle
+from app.core import login_throttle, rate_limit
 from app.core.deps import get_current_user
+from app.core.phone import find_user_by_phone
 from app.core.security import (
     create_access_token,
     generate_token,
@@ -36,6 +37,7 @@ from app.schemas.auth import (
     RefreshRequest,
     TokenPair,
 )
+from app.schemas.driver_application import DriverChangePinRequest, DriverSetPinRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -69,12 +71,13 @@ async def _issue_token_pair(
 
 @router.post("/driver-login", response_model=DriverTokenResponse)
 async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Teléfono + PIN — el PIN lo asigna el operador (POST /drivers o
-    POST /drivers/{id}/pin), no lo elige el chofer. Un solo paso, a
-    diferencia del OTP anterior: no hay nada que enumerar aparte con un
-    segundo endpoint, así que el throttle y el mensaje genérico de error
-    (igual sea teléfono inexistente, sin PIN asignado, o PIN incorrecto)
-    bastan, mismo patrón que /auth/login.
+    """Teléfono + PIN. El PIN lo elige el chofer (tras aprobación, via
+    POST /auth/driver/set-pin) o, en altas viejas, lo asigna el operador.
+    Un solo paso: el throttle y el mensaje genérico de error (igual sea
+    teléfono inexistente, sin PIN, must_set_pin, o PIN incorrecto) bastan,
+    mismo patrón que /auth/login.
+
+    El folio CTM no entra aquí: no es credencial.
 
     Sin refresh token: emite directo un access token de
     DRIVER_ACCESS_TOKEN_HOURS (no pasa por _issue_token_pair, que sí crea
@@ -87,8 +90,7 @@ async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(g
     except login_throttle.LoginLockedError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
 
-    result = await db.execute(select(User).where(User.phone == payload.phone))
-    user = result.scalar_one_or_none()
+    user = await find_user_by_phone(db, payload.phone)
 
     driver = None
     if user is not None:
@@ -99,6 +101,7 @@ async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(g
         user is None
         or driver is None
         or driver.pin_hash is None
+        or driver.must_set_pin
         or not secrets.compare_digest(driver.pin_hash, hash_token(payload.pin))
         or not user.is_active
     ):
@@ -114,6 +117,100 @@ async def driver_login(payload: DriverLoginRequest, db: AsyncSession = Depends(g
     return DriverTokenResponse(
         access_token=access, expires_in=settings.DRIVER_ACCESS_TOKEN_HOURS * 3600
     )
+
+
+async def _limit_set_pin(identifier: str) -> None:
+    try:
+        await rate_limit.hit(
+            f"rl:set-pin:{identifier}",
+            settings.DRIVER_SET_PIN_RATE_LIMIT_MAX,
+            settings.DRIVER_SET_PIN_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except rate_limit.RateLimitExceeded as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+
+
+@router.post("/driver/set-pin", response_model=MessageResponse)
+async def driver_set_pin(
+    payload: DriverSetPinRequest, db: AsyncSession = Depends(get_db)
+):
+    """Primera vez: el chofer inventa su PIN. Identificación = teléfono +
+    folio CTM (el folio es operativo, no secreto). Solo si la cuenta está
+    ACTIVE y todavía no hay pin_hash / must_set_pin=true."""
+    await _limit_set_pin(payload.phone)
+    await _limit_set_pin(payload.folio_ctm)
+
+    if payload.pin != payload.pin_confirm:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "El PIN y su confirmación no coinciden"
+        )
+
+    user = await find_user_by_phone(db, payload.phone)
+    driver = None
+    if user is not None:
+        driver_result = await db.execute(select(Driver).where(Driver.user_id == user.id))
+        driver = driver_result.scalar_one_or_none()
+
+    if (
+        user is None
+        or driver is None
+        or not user.is_active
+        or (driver.folio_ctm or "").upper() != payload.folio_ctm
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No se puede establecer el PIN")
+
+    if driver.pin_hash is not None and not driver.must_set_pin:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Ya tienes un PIN. Usa change-pin o pide un reset al operador",
+        )
+
+    driver.pin_hash = hash_token(payload.pin)
+    driver.must_set_pin = False
+    return MessageResponse(detail="PIN guardado")
+
+
+@router.post("/driver/change-pin", response_model=MessageResponse)
+async def driver_change_pin(
+    payload: DriverChangePinRequest, db: AsyncSession = Depends(get_db)
+):
+    """El chofer regenera su PIN con el actual. El operador no inventa uno:
+    si lo olvidó, force-reset-pin deja must_set_pin=true y el chofer usa
+    set-pin otra vez."""
+    await _limit_set_pin(payload.phone)
+
+    if payload.new_pin != payload.new_pin_confirm:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "El PIN nuevo y su confirmación no coinciden",
+        )
+
+    try:
+        await login_throttle.check_not_locked(payload.phone)
+    except login_throttle.LoginLockedError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+
+    user = await find_user_by_phone(db, payload.phone)
+    driver = None
+    if user is not None:
+        driver_result = await db.execute(select(Driver).where(Driver.user_id == user.id))
+        driver = driver_result.scalar_one_or_none()
+
+    if (
+        user is None
+        or driver is None
+        or driver.pin_hash is None
+        or driver.must_set_pin
+        or not secrets.compare_digest(driver.pin_hash, hash_token(payload.current_pin))
+        or not user.is_active
+    ):
+        await login_throttle.record_failure(payload.phone)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
+
+    await login_throttle.reset(payload.phone)
+    driver.pin_hash = hash_token(payload.new_pin)
+    driver.must_set_pin = False
+    return MessageResponse(detail="PIN actualizado")
 
 
 # --- Login con contraseña (operadores) ----------------------------------------
