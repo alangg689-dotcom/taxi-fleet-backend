@@ -4,9 +4,25 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.phone import InvalidPhoneError, normalize_mx_phone
 from app.models.enums import VehicleStatus
+
+
+def _optional_folio(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return value.strip().upper()
+
+
+def _optional_phone(value: str | None) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return normalize_mx_phone(value)
+    except InvalidPhoneError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 class VehicleCreate(BaseModel):
@@ -17,6 +33,37 @@ class VehicleCreate(BaseModel):
     # spec-sitios-y-fila-v2.md. Requerido a propósito: no existe un "sin
     # sitio" válido, ni siquiera como default.
     stand_id: UUID
+    # ID operativo visible (CTM-045). No es device_key ni PIN.
+    folio_ctm: str | None = Field(None, max_length=20)
+    # Si viene, se WhatsAppea la device_key a este número al dar de alta.
+    driver_phone: str | None = Field(None, max_length=20, examples=["6621234567"])
+    notify: bool = True
+
+    @field_validator("folio_ctm")
+    @classmethod
+    def _folio(cls, value: str | None) -> str | None:
+        return _optional_folio(value)
+
+    @field_validator("driver_phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return _optional_phone(value)
+
+
+class DeviceKeyNotifyIn(BaseModel):
+    """Cuerpo opcional de POST /vehicles/{id}/device-key.
+
+    Sin cuerpo (o vacío) se WhatsAppea al chofer del turno abierto, si
+    hay teléfono. `notify=false` solo regenera y devuelve la clave.
+    """
+
+    phone: str | None = Field(None, max_length=20, examples=["6621234567"])
+    notify: bool = True
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return _optional_phone(value)
 
 
 class VehicleUpdate(BaseModel):

@@ -52,6 +52,8 @@ async def test_send_whatsapp_message_posts_expected_payload(monkeypatch):
 
 
 async def test_send_whatsapp_message_does_not_raise_on_rejection(monkeypatch):
+    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "ACxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "secret-token")
     monkeypatch.setattr(whatsapp_service.httpx, "AsyncClient", _FakeAsyncClient)
     _FakeAsyncClient.next_response = _FakeResponse(400, "número inválido")
 
@@ -63,6 +65,64 @@ async def test_send_whatsapp_message_does_not_raise_on_network_error(monkeypatch
         async def post(self, url: str, auth=None, data=None):
             raise httpx.ConnectError("no se pudo conectar")
 
+    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "ACxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "secret-token")
     monkeypatch.setattr(whatsapp_service.httpx, "AsyncClient", _BrokenClient)
 
     await whatsapp_service.send_whatsapp_message("+525512340001", "hola")
+
+
+async def test_send_whatsapp_message_skips_when_credentials_empty(monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "")
+    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "")
+    monkeypatch.setattr(whatsapp_service.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.last_call = None
+
+    await whatsapp_service.send_whatsapp_message("+525512340001", "hola")
+
+    assert _FakeAsyncClient.last_call is None
+    assert "TWILIO_ACCOUNT_SID" in caplog.text
+
+
+async def test_notify_driver_device_key_sends_key_not_folio(monkeypatch):
+    sent: list[tuple[str, str]] = []
+
+    async def _fake_send(to_phone: str, body: str) -> None:
+        sent.append((to_phone, body))
+
+    monkeypatch.setattr(whatsapp_service, "send_whatsapp_message", _fake_send)
+
+    await whatsapp_service.notify_driver_device_key(
+        "6621234567",
+        "VZE-123-A",
+        "CTM-045",
+        "gps-device-key-unico",
+    )
+
+    assert len(sent) == 1
+    phone, body = sent[0]
+    assert phone == "+526621234567"
+    assert "gps-device-key-unico" in body
+    assert body.endswith("gps-device-key-unico")
+    assert "CTM-045" in body
+    assert "VZE-123-A" in body
+    assert "No es tu Folio ni tu PIN" in body
+    assert not body.endswith("CTM-045")
+
+
+async def test_notify_driver_device_key_skips_without_phone(monkeypatch):
+    sent: list[tuple[str, str]] = []
+
+    async def _fake_send(to_phone: str, body: str) -> None:
+        sent.append((to_phone, body))
+
+    monkeypatch.setattr(whatsapp_service, "send_whatsapp_message", _fake_send)
+
+    await whatsapp_service.notify_driver_device_key(
+        None, "ABC-123", "CTM-001", "secret-key"
+    )
+
+    assert sent == []
