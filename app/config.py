@@ -56,8 +56,10 @@ class Settings(BaseSettings):
     PING_WINDOW_SECONDS: int = 60
 
     # --- Bot de WhatsApp (Twilio) ---
-    # El login de chofer ya no usa Twilio (ver spec de PIN, app.api.auth) —
-    # estas credenciales quedan solo para el bot de WhatsApp de clientes.
+    # El login de chofer ya no usa Twilio (ver spec de PIN, app.api.auth).
+    # Estas credenciales sirven al bot de clientes y a la entrega de la
+    # device_key GPS al chofer (notify_driver_device_key). Vacías: se
+    # registra un warning y no se manda nada; el JSON sigue trayendo la clave.
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     # Número compartido del sandbox de Twilio por default — el mismo para

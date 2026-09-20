@@ -80,7 +80,7 @@ Ambos logins comparten el mismo throttle (`app.core.login_throttle`, sobre el co
 
 > **El PIN de un chofer y la `device_key` de una unidad se devuelven en claro una sola vez**, en la respuesta que los genera o regenera. El backend solo guarda el hash. Cualquier flujo nuevo que los toque tiene que respetar eso.
 
-El login de chofer **ya no depende de Twilio**: el PIN reemplazó al OTP por SMS (migración `20260807_1200_pin_de_chofer`). Twilio quedó únicamente para el bot de WhatsApp de clientes — ver [.env.example](.env.example) para las credenciales que hace falta llenar. Se habla con su API por REST directo con `httpx`, sin el SDK oficial, porque ese es síncrono y bloquearía el event loop.
+El login de chofer **ya no depende de Twilio**: el PIN reemplazó al OTP por SMS (migración `20260807_1200_pin_de_chofer`). Twilio mueve el bot de WhatsApp de clientes **y** la entrega de la `device_key` GPS al teléfono del chofer cuando se crea o regenera la clave (`app.core.whatsapp.notify_driver_device_key`). El folio CTM es ID operativo, no secreto: va en el texto del mensaje, nunca en el lugar de la clave. Hace falta `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` y `TWILIO_WHATSAPP_FROM` — si están vacías, se registra un warning y la API igual devuelve `device_key` en JSON. Se habla con Twilio por REST directo con `httpx`, sin el SDK oficial, porque ese es síncrono y bloquearía el event loop.
 
 Los choferes dados de alta antes de la migración nacieron con `pin_hash` NULL: no pueden entrar hasta que un operador les asigne uno con `POST /drivers/{id}/pin`. El campo `has_pin` del listado de choferes es justo para que el dashboard los distinga.
 
@@ -88,7 +88,7 @@ Los choferes dados de alta antes de la migración nacieron con `pin_hash` NULL: 
 
 **Auth** — `POST /auth/driver-login` (chofer: teléfono + PIN) · `/auth/login` (operador/admin: email + contraseña) · `/auth/refresh` · `/auth/logout`
 
-**Vehículos** — `GET|POST /vehicles` (paginado, ver abajo) · `GET|PATCH /vehicles/{id}` (solo staff, cualquier campo) · `POST /vehicles/{id}/status` (el propio chofer puede marcar su unidad disponible/ocupado — ver abajo) · `POST /vehicles/{id}/device-key` (regenera la clave de dispositivo; solo staff — re-emparejar un teléfono con una unidad es decisión de operador/admin, no del chofer) · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close` · `GET /vehicles/{id}/queue-position` (en qué sitio y en qué lugar de la fila va esa unidad ahora mismo; `null` si no está formada)
+**Vehículos** — `GET|POST /vehicles` (paginado, ver abajo) · `GET|PATCH /vehicles/{id}` (solo staff, cualquier campo) · `POST /vehicles/{id}/status` (el propio chofer puede marcar su unidad disponible/ocupado — ver abajo) · `POST /vehicles/{id}/device-key` (regenera la clave de dispositivo; solo staff — re-emparejar un teléfono con una unidad es decisión de operador/admin, no del chofer; si hay teléfono del turno abierto o `phone` en el cuerpo, se WhatsAppea la clave) · `POST /vehicles/{id}/assignments` (abre turno y cierra el anterior) · `GET /vehicles/{id}/assignments` (historial) · `POST /vehicles/{id}/assignments/close` · `GET /vehicles/{id}/queue-position` (en qué sitio y en qué lugar de la fila va esa unidad ahora mismo; `null` si no está formada)
 
 **Choferes** — `GET|POST /drivers` (alta solo admin; listado paginado) · `GET|PATCH /drivers/{id}` · `POST /drivers/{id}/pin` (regenera el PIN de login; solo admin — el nuevo invalida el anterior de inmediato y se muestra en claro una sola vez) · `POST /drivers/{id}/deactivate|reactivate` (revoca/restaura el login; solo admin) · `POST /drivers/me/push-token` (el chofer registra el token de push de su teléfono — ver "Notificaciones push" abajo)
 
@@ -331,7 +331,7 @@ Nadie manda mensajes directo: todo pasa por `app.core.customer_notify.notify_cus
 ## Pendiente
 
 - [x] Router de viajes (`/trips`)
-- [x] Integración real de Twilio — en su momento para el OTP por SMS del chofer; ese login se reemplazó por PIN y hoy Twilio solo mueve el bot de WhatsApp de clientes (la variable `SMS_PROVIDER` ya no existe)
+- [x] Integración real de Twilio — en su momento para el OTP por SMS del chofer; ese login se reemplazó por PIN y hoy Twilio mueve el bot de WhatsApp de clientes y la entrega de la `device_key` GPS al chofer (la variable `SMS_PROVIDER` ya no existe)
 - [x] Login de chofer por PIN en un paso, sin dependencia de SMS (`POST /auth/driver-login`)
 - [x] Suite de pruebas con pytest (auth, vehicles, trips, reportería)
 - [x] Restringir CORS al dominio del dashboard antes de producción (`CORS_ORIGINS` en `.env`)

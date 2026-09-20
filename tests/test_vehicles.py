@@ -1,3 +1,4 @@
+import app.core.whatsapp as whatsapp_service
 from app.models import StandQueue, StandQueueStatus, UserRole, VehicleStatus
 from tests.factories import (
     auth_headers,
@@ -332,6 +333,104 @@ async def test_regenerate_device_key_unknown_vehicle_is_404(client, db_session):
         headers=auth_headers(operator_token),
     )
     assert response.status_code == 404
+
+
+async def test_regenerate_device_key_whatsapps_assigned_driver(
+    client, db_session, monkeypatch
+):
+    """Con turno abierto se manda la device_key al teléfono del chofer.
+    El folio va en el texto; la clave pegable es device_key, no el folio."""
+    sent: list[tuple[str, str]] = []
+
+    async def _fake_send(to_phone: str, body: str) -> None:
+        sent.append((to_phone, body))
+
+    monkeypatch.setattr(whatsapp_service, "send_whatsapp_message", _fake_send)
+
+    vehicle, old_key = await make_vehicle(db_session, with_device_key=True)
+    vehicle.folio_ctm = "CTM-045"
+    await db_session.flush()
+    driver, _ = await make_driver(db_session, phone="6621987654")
+    await make_open_assignment(db_session, vehicle_id=vehicle.id, driver_id=driver.id)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/device-key",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "device_key" in body
+    assert body["device_key"] != old_key
+    assert body["folio_ctm"] == "CTM-045"
+
+    assert len(sent) == 1
+    phone, message = sent[0]
+    assert phone == "+526621987654"
+    assert body["device_key"] in message
+    assert "CTM-045" in message
+    assert message.endswith(body["device_key"])
+    assert not message.endswith("CTM-045")
+
+
+async def test_regenerate_device_key_without_assignment_does_not_whatsapp(
+    client, db_session, monkeypatch
+):
+    sent: list[tuple[str, str]] = []
+
+    async def _fake_send(to_phone: str, body: str) -> None:
+        sent.append((to_phone, body))
+
+    monkeypatch.setattr(whatsapp_service, "send_whatsapp_message", _fake_send)
+
+    vehicle, _ = await make_vehicle(db_session, with_device_key=True)
+    _, operator_token = await make_staff_user(db_session, role=UserRole.OPERATOR)
+
+    response = await client.post(
+        f"/api/v1/vehicles/{vehicle.id}/device-key",
+        headers=auth_headers(operator_token),
+    )
+    assert response.status_code == 200
+    assert "device_key" in response.json()
+    assert sent == []
+
+
+async def test_create_vehicle_whatsapps_driver_phone_from_body(
+    client, db_session, monkeypatch
+):
+    sent: list[tuple[str, str]] = []
+
+    async def _fake_send(to_phone: str, body: str) -> None:
+        sent.append((to_phone, body))
+
+    monkeypatch.setattr(whatsapp_service, "send_whatsapp_message", _fake_send)
+
+    _, admin_token = await make_staff_user(db_session, role=UserRole.ADMIN)
+    stand = await make_stand(db_session)
+
+    response = await client.post(
+        "/api/v1/vehicles",
+        json={
+            "plate": "WAPP-1",
+            "model": "Nissan Versa",
+            "year": 2022,
+            "stand_id": str(stand.id),
+            "folio_ctm": "CTM-088",
+            "driver_phone": "6621112233",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["device_key"]
+    assert body["folio_ctm"] == "CTM-088"
+
+    assert len(sent) == 1
+    phone, message = sent[0]
+    assert phone == "+526621112233"
+    assert body["device_key"] in message
+    assert "CTM-088" in message
+    assert message.endswith(body["device_key"])
 
 
 # --- GET /vehicles/{id}/queue-position ---------------------------------------

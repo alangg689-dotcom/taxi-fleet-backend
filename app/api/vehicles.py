@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,12 +11,14 @@ from app.core.deps import require_roles
 from app.core.redis_client import publish_vehicle_status_update
 from app.core.security import generate_token, hash_token
 from app.core.stands import get_vehicle_queue_position
+from app.core.whatsapp import notify_driver_device_key
 from app.database import get_db
 from app.models import Driver, Stand, User, UserRole, Vehicle, VehicleAssignment
 from app.schemas.stand import QueuePositionOut
 from app.schemas.vehicle import (
     AssignmentCreate,
     AssignmentOut,
+    DeviceKeyNotifyIn,
     VehicleCreate,
     VehicleCreated,
     VehicleOut,
@@ -53,6 +55,54 @@ def _vehicle_with_driver_query():
 def _to_vehicle_out(vehicle: Vehicle, numeral: str | None, name: str | None) -> VehicleOut:
     return VehicleOut.model_validate(vehicle).model_copy(
         update={"driver_numeral": numeral, "driver_name": name}
+    )
+
+
+def _to_vehicle_created(vehicle: Vehicle, device_key: str) -> VehicleCreated:
+    return VehicleCreated(
+        id=vehicle.id,
+        plate=vehicle.plate,
+        model=vehicle.model,
+        year=vehicle.year,
+        status=vehicle.status,
+        stand_id=vehicle.stand_id,
+        folio_ctm=vehicle.folio_ctm,
+        device_key=device_key,
+    )
+
+
+async def _assigned_driver_phone(
+    db: AsyncSession, vehicle_id: uuid.UUID
+) -> str | None:
+    """Teléfono del chofer del turno abierto, si lo hay."""
+    result = await db.execute(
+        select(User.phone)
+        .join(Driver, Driver.user_id == User.id)
+        .join(
+            VehicleAssignment,
+            and_(
+                VehicleAssignment.driver_id == Driver.id,
+                VehicleAssignment.vehicle_id == vehicle_id,
+                VehicleAssignment.ended_at.is_(None),
+            ),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _maybe_notify_device_key(
+    db: AsyncSession,
+    vehicle: Vehicle,
+    device_key: str,
+    *,
+    notify: bool,
+    override_phone: str | None,
+) -> None:
+    if not notify:
+        return
+    phone = override_phone or await _assigned_driver_phone(db, vehicle.id)
+    await notify_driver_device_key(
+        phone, vehicle.plate, vehicle.folio_ctm, device_key
     )
 
 
@@ -127,7 +177,9 @@ async def create_vehicle(
     """Da de alta una unidad y genera su clave de dispositivo.
 
     La clave se devuelve en claro únicamente en esta respuesta; en la base solo
-    queda el hash. Hay que capturarla en la app del chofer en ese momento.
+    queda el hash. Si hay `driver_phone` (o un turno abierto, raro en el
+    alta) se manda también por WhatsApp. El folio CTM no es secreto y nunca
+    se envía en el lugar de la clave.
     """
     exists = await db.execute(select(Vehicle).where(Vehicle.plate == payload.plate))
     if exists.scalar_one_or_none() is not None:
@@ -136,26 +188,36 @@ async def create_vehicle(
     if await db.get(Stand, payload.stand_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sitio no encontrado")
 
+    if payload.folio_ctm is not None:
+        folio_taken = await db.execute(
+            select(Vehicle).where(Vehicle.folio_ctm == payload.folio_ctm)
+        )
+        if folio_taken.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Ya existe una unidad con ese folio CTM"
+            )
+
     device_key = generate_token()
     vehicle = Vehicle(
         plate=payload.plate,
         model=payload.model,
         year=payload.year,
         stand_id=payload.stand_id,
+        folio_ctm=payload.folio_ctm,
         device_key_hash=hash_token(device_key),
     )
     db.add(vehicle)
     await db.flush()
 
-    return VehicleCreated(
-        id=vehicle.id,
-        plate=vehicle.plate,
-        model=vehicle.model,
-        year=vehicle.year,
-        status=vehicle.status,
-        stand_id=vehicle.stand_id,
-        device_key=device_key,
+    await _maybe_notify_device_key(
+        db,
+        vehicle,
+        device_key,
+        notify=payload.notify,
+        override_phone=payload.driver_phone,
     )
+
+    return _to_vehicle_created(vehicle, device_key)
 
 
 @router.patch("/{vehicle_id}", response_model=VehicleOut)
@@ -186,29 +248,36 @@ async def update_vehicle(
 @router.post("/{vehicle_id}/device-key", response_model=VehicleCreated)
 async def regenerate_device_key(
     vehicle_id: uuid.UUID,
+    payload: DeviceKeyNotifyIn | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(staff_only),
 ):
     """Genera una clave de dispositivo nueva para una unidad que ya existe —
     la anterior deja de servir de inmediato. Pensado para cuando cambia el
     teléfono montado en la unidad; a diferencia de POST /vehicles/{id}/status,
-    esto es solo para operador/admin, el chofer no puede hacerlo por su cuenta."""
+    esto es solo para operador/admin, el chofer no puede hacerlo por su cuenta.
+
+    Si hay teléfono (turno abierto o `phone` en el cuerpo) se manda la
+    clave por WhatsApp. El folio CTM no se envía como clave. Sin Twilio
+    configurado, se registra un warning y esta respuesta sigue trayendo
+    `device_key` en claro una sola vez."""
     vehicle = await db.get(Vehicle, vehicle_id)
     if vehicle is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unidad no encontrada")
 
+    options = payload or DeviceKeyNotifyIn()
     device_key = generate_token()
     vehicle.device_key_hash = hash_token(device_key)
 
-    return VehicleCreated(
-        id=vehicle.id,
-        plate=vehicle.plate,
-        model=vehicle.model,
-        year=vehicle.year,
-        status=vehicle.status,
-        stand_id=vehicle.stand_id,
-        device_key=device_key,
+    await _maybe_notify_device_key(
+        db,
+        vehicle,
+        device_key,
+        notify=options.notify,
+        override_phone=options.phone,
     )
+
+    return _to_vehicle_created(vehicle, device_key)
 
 
 @router.post("/{vehicle_id}/status", response_model=VehicleOut)
