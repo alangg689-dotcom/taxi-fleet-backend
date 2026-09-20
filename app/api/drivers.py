@@ -9,6 +9,7 @@ chofer elija en la app.
 """
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, func, select
@@ -17,8 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import require_roles
 from app.core.security import generate_pin, hash_token
 from app.database import get_db
-from app.models import Driver, User, UserRole, Vehicle, VehicleAssignment
+from app.models import (
+    Driver,
+    DriverDevice,
+    DriverDeviceStatus,
+    User,
+    UserRole,
+    Vehicle,
+    VehicleAssignment,
+)
 from app.schemas.driver import DriverCreate, DriverCreated, DriverOut, DriverUpdate, PushTokenUpdate
+from app.schemas.driver_application import MessageCountResponse
 
 router = APIRouter(prefix="/drivers", tags=["choferes"])
 
@@ -50,6 +60,9 @@ def _driver_query():
             Driver.status,
             User.is_active,
             Driver.pin_hash.isnot(None).label("has_pin"),
+            Driver.must_set_pin,
+            Driver.folio_ctm,
+            Driver.unit_role,
             Vehicle.id.label("current_vehicle_id"),
             Vehicle.plate.label("current_vehicle_plate"),
         )
@@ -122,6 +135,7 @@ async def create_driver(
         license_number=payload.license_number,
         numeral=payload.numeral,
         pin_hash=hash_token(pin),
+        must_set_pin=False,
     )
     db.add(driver)
     await db.flush()
@@ -144,9 +158,51 @@ async def regenerate_pin(
 
     pin = generate_pin()
     driver.pin_hash = hash_token(pin)
+    driver.must_set_pin = False
 
     result = await db.execute(_driver_query().where(Driver.id == driver_id))
     return DriverCreated(**result.mappings().one(), pin=pin)
+
+
+@router.post("/{driver_id}/force-reset-pin", response_model=DriverOut)
+async def force_reset_pin(
+    driver_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Borra el PIN y marca must_set_pin=true. El operador NO inventa un
+    PIN nuevo: el chofer tiene que abrir la app y crear el suyo
+    (POST /auth/driver/set-pin)."""
+    driver = await _get_driver_or_404(db, driver_id)
+    driver.pin_hash = None
+    driver.must_set_pin = True
+
+    result = await db.execute(_driver_query().where(Driver.id == driver_id))
+    return DriverOut(**result.mappings().one())
+
+
+@router.post("/{driver_id}/devices/revoke", response_model=MessageCountResponse)
+async def revoke_driver_devices(
+    driver_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(staff_only),
+):
+    """Revoca todos los device_token activos del teléfono del chofer.
+    No toca Vehicle.device_key (GPS de la unidad)."""
+    await _get_driver_or_404(db, driver_id)
+    now = datetime.now(UTC)
+    result = await db.execute(
+        select(DriverDevice).where(
+            DriverDevice.driver_id == driver_id,
+            DriverDevice.status == DriverDeviceStatus.ACTIVE,
+        )
+    )
+    revoked = 0
+    for device in result.scalars().all():
+        device.status = DriverDeviceStatus.REVOKED
+        device.revoked_at = now
+        revoked += 1
+    return MessageCountResponse(detail="Dispositivos revocados", revoked=revoked)
 
 
 @router.post("/me/push-token", status_code=status.HTTP_204_NO_CONTENT)

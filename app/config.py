@@ -125,6 +125,22 @@ class Settings(BaseSettings):
     BOT_RIDE_MAX_PER_WINDOW: int = 10
     BOT_RIDE_WINDOW_SECONDS: int = 300
 
+    # --- Autorregistro de choferes (público, sin OTP) ---
+    # Fotos de rostro/licencia. UUID como nombre; se sirven en /api/v1/uploads.
+    UPLOAD_DIR: str = "uploads"
+    UPLOAD_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
+    # Techos por IP / teléfono / folio. Ventana fija, mismo incr_with_ttl
+    # que el resto de throttles. Holgados: un alta real son 1 solicitud +
+    # 2 fotos; esto frena un script, no a un chofer con mala señal.
+    DRIVER_APP_RATE_LIMIT_MAX: int = 8
+    DRIVER_APP_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+    DRIVER_UPLOAD_RATE_LIMIT_MAX: int = 20
+    DRIVER_UPLOAD_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+    DRIVER_STATUS_RATE_LIMIT_MAX: int = 30
+    DRIVER_STATUS_RATE_LIMIT_WINDOW_SECONDS: int = 600
+    DRIVER_SET_PIN_RATE_LIMIT_MAX: int = 10
+    DRIVER_SET_PIN_RATE_LIMIT_WINDOW_SECONDS: int = 900
+
     # --- Sitios y fila de espera ---
     # Ver spec-sitios-y-fila-v2.md. Los defaults de sitio individual
     # (still_seconds, max_speed_kmh, buffer del polígono) viven como columnas

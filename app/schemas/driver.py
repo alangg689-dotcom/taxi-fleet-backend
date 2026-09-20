@@ -32,8 +32,16 @@ class DriverUpdate(BaseModel):
     full_name: str | None = Field(None, max_length=150)
     status: DriverStatus | None = None
     numeral: str | None = Field(None, min_length=1, max_length=10)
+    folio_ctm: str | None = Field(None, min_length=1, max_length=20)
 
     _normalize = field_validator("numeral")(_normalize_numeral)
+
+    @field_validator("folio_ctm")
+    @classmethod
+    def _folio(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().upper() or None
 
 
 class PushTokenUpdate(BaseModel):
@@ -48,7 +56,7 @@ class DriverOut(BaseModel):
 
     id: UUID
     user_id: UUID
-    phone: str
+    phone: str | None
     full_name: str
     license_number: str
     # Nulo solo para los choferes anteriores a la migración 0011, que todavía
@@ -60,6 +68,13 @@ class DriverOut(BaseModel):
     # dashboard distinga a quién le falta asignarle un PIN todavía (los
     # migrados del login por OTP nacieron sin uno).
     has_pin: bool
+    # True tras aprobar una solicitud o tras un force-reset: el chofer
+    # tiene que inventar el PIN (POST /auth/driver/set-pin). El operador
+    # no lo genera.
+    must_set_pin: bool = False
+    # ID operativo de la unidad (ej. CTM-045). No es el numeral de radio.
+    folio_ctm: str | None = None
+    unit_role: str | None = None
     # Unidad del turno abierto, si trae uno. Nulos = chofer libre, y son los
     # únicos que el dashboard ofrece al asignar una unidad.
     current_vehicle_id: UUID | None = None

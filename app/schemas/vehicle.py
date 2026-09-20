@@ -51,6 +51,8 @@ class VehicleOut(BaseModel):
     # con el numeral y cae de vuelta a la placa cuando viene nulo.
     driver_numeral: str | None = None
     driver_name: str | None = None
+    # ID operativo de la unidad (ej. CTM-045). Visible. No es device_key.
+    folio_ctm: str | None = None
 
 
 class VehicleCreated(VehicleOut):

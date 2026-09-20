@@ -8,7 +8,7 @@ El chofer actual es simplemente la asignación con ended_at = NULL.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -35,7 +35,12 @@ class Vehicle(Base):
     )
     # Credencial ligera del dispositivo: el endpoint de telemetría la valida en
     # lugar de un JWT completo, porque se invoca cada 5-10 segundos por unidad.
+    # Distinto del device_token del teléfono del chofer (driver_devices).
     device_key_hash: Mapped[str | None] = mapped_column(String(255), index=True)
+    # ID operativo de la unidad (ej. CTM-045). Visible. No es device_key
+    # ni PIN. Único entre las unidades que sí lo tienen; varios choferes
+    # pueden referenciar el mismo folio desde drivers.folio_ctm.
+    folio_ctm: Mapped[str | None] = mapped_column(String(20))
     # NOT NULL a propósito: son 6 sitios fijos y toda unidad pertenece a uno
     # (decisión de negocio, ver spec-sitios-y-fila-v2.md). La unidad es la
     # que pertenece al sitio, no el chofer — si rota de unidad vía
@@ -49,6 +54,15 @@ class Vehicle(Base):
 
     assignments: Mapped[list["VehicleAssignment"]] = relationship(
         back_populates="vehicle"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_vehicles_folio_ctm",
+            "folio_ctm",
+            unique=True,
+            postgresql_where=text("folio_ctm IS NOT NULL"),
+        ),
     )
 
 

@@ -7,6 +7,9 @@ venv/
 .pytest_cache/
 *.log
 
+# Fotos de autorregistro (rostro / licencia). UUID como nombre; no versionar.
+uploads/
+
 # Scripts de prueba local (simuladores de flota y carga de sitios de ejemplo).
 # Se ignoran uno por uno a proposito: scripts/ tambien tiene seed_admin.py, que
 # si esta versionado y es parte del arranque documentado en el README.
